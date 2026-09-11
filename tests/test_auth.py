@@ -88,3 +88,12 @@ def test_parse_token_url_accepts_forced_openlms_scheme():
 def test_settings_handler_schemes_default_and_override():
     assert Settings.from_env({}, dotenv=False).handler_schemes == ("nexusmcp", "ltgopenlmsapp")
     assert Settings.from_env({"NEXUS_HANDLER_SCHEMES": "a, b"}, dotenv=False).handler_schemes == ("a", "b")
+
+
+def test_callback_module_writes_link(tmp_path):
+    from nexus_mcp.auth.callback import main
+
+    out = tmp_path / "cb.txt"
+    assert main(["--out", str(out), "ltgopenlmsapp://token=abc"]) == 0
+    assert out.read_text() == "ltgopenlmsapp://token=abc"
+    assert main(["--out", str(out)]) == 1

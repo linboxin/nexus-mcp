@@ -20,52 +20,39 @@ It uses Moodle's official web-service API with your own student token. It never 
 
 Times are in your academic timezone (America/New_York). Errors carry a code: `NEXUS_AUTH_ERROR`, `NEXUS_PERMISSION_ERROR`, `NEXUS_UNSUPPORTED`, `NEXUS_RESOURCE_NOT_FOUND`, `NEXUS_API_ERROR`.
 
-## Setup
+## Setup (2 minutes)
 
-Requires [uv](https://docs.astral.sh/uv/) and a Union student account.
+You need [uv](https://docs.astral.sh/uv/) (one-line installer below) and a Union student account.
 
 ```bash
-git clone <this repo> nexus-mcp && cd nexus-mcp
-uv sync
-uv run nexus-mcp login
-uv run nexus-mcp test-connection
+curl -LsSf https://astral.sh/uv/install.sh | sh      # skip if you already have uv
+uvx union-nexus-mcp setup
 ```
 
-`login` opens Nexus in your browser. Sign in with Okta as usual. On the page that says *"Your registration has been confirmed"*, click **"Click here if the app does not open automatically."** and allow **Open Nexus MCP Login**. The token lands in your macOS Keychain. No password is ever typed into this tool. Details: [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
+`setup` does everything: it opens Nexus in your browser for the Okta sign-in, registers the server with every AI client it finds on your machine (Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Gemini CLI, Codex CLI), and runs the connection test. Restart the client and ask it what's due.
 
-If the browser shows no prompt (Linux/Windows, or the handler is missing), right-click that link → *Copy Link Address* → paste it into the terminal.
+On the Nexus page that says *"Your registration has been confirmed"*, click **"Click here if the app does not open automatically."** and allow **Open Nexus MCP Login**. That hands the token to the terminal; it is stored in your OS keyring. No password is ever typed into this tool. If no prompt appears, right-click that link → *Copy Link Address* → paste it into the terminal. Details: [docs/AUTHENTICATION.md](docs/AUTHENTICATION.md).
 
-## Connect a client
-
-Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+Pick clients explicitly with `uvx union-nexus-mcp setup --client claude-desktop --client cursor`, or add a client later with `uvx union-nexus-mcp install --client <key>` (`clients` lists the keys). `install --dry-run` prints the snippet if you'd rather edit a config by hand:
 
 ```json
-{
-  "mcpServers": {
-    "nexus": {
-      "command": "uv",
-      "args": ["run", "--directory", "/ABSOLUTE/PATH/TO/nexus-mcp", "nexus-mcp", "serve"]
-    }
-  }
-}
+{ "mcpServers": { "nexus": { "command": "uvx", "args": ["union-nexus-mcp", "serve"] } } }
 ```
 
-Claude Code:
-
-```bash
-claude mcp add nexus -- uv run --directory /ABSOLUTE/PATH/TO/nexus-mcp nexus-mcp serve
-```
+GUI apps often can't see `uvx` on their PATH; `install` writes the absolute path for you (`which uvx` if editing manually).
 
 ## Commands
 
 ```bash
-uv run nexus-mcp test-connection   # reachability, auth, identity, capability matrix
-uv run nexus-mcp list-courses      # the Phase 0 proof; --all includes past terms
-uv run nexus-mcp whoami
-uv run nexus-mcp logout
-uv run scripts/test_moodle_api.py --all   # verbose read-only API diagnostics
-uv run pytest                      # mocked Moodle, no credentials needed
+uvx union-nexus-mcp setup              # login + client config + test
+uvx union-nexus-mcp login              # sign in again (token expired / new machine)
+uvx union-nexus-mcp test-connection    # reachability, auth, identity, capability matrix
+uvx union-nexus-mcp list-courses       # --all includes past terms
+uvx union-nexus-mcp install --client cursor --dry-run
+uvx union-nexus-mcp logout
 ```
+
+Working from a clone instead: `uv sync`, then `uv run nexus-mcp <command>`; `setup`/`install` then register the checkout itself. `uv run pytest` runs the mocked test-suite; `uv run scripts/test_moodle_api.py --all` is the verbose API diagnostic. Releases: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Configuration
 

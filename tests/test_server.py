@@ -71,6 +71,6 @@ def test_cli_parser_has_all_commands():
     from nexus_mcp.cli import build_parser
 
     parser = build_parser()
-    for cmd in ["login", "logout", "test-connection", "whoami", "list-courses", "serve"]:
+    for cmd in ["login", "logout", "test-connection", "whoami", "list-courses", "serve", "setup", "install", "clients"]:
         args = parser.parse_args([cmd] if cmd != "login" else ["login", "--no-browser"])
         assert args.command == cmd

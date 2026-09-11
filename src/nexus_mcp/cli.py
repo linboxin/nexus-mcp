@@ -11,6 +11,7 @@ from typing import Any
 
 from . import __version__
 from .auth import LoginSession, StoredToken, TokenStore, parse_token_url, resolve_token
+from .clients import ClientConfigError, all_clients, detect_clients, get_client, install, server_command
 from .config import Settings
 from .errors import NexusAuthError, NexusError
 from .moodle.client import MoodleClient
@@ -45,54 +46,65 @@ async def verify_token(settings: Settings, token: str) -> StoredToken:
     )
 
 
+def run_login(
+    settings: Settings,
+    store: TokenStore,
+    *,
+    no_browser: bool = False,
+    no_handler: bool = False,
+    token_url: str | None = None,
+    passport: str | None = None,
+    timeout: float = 600.0,
+) -> StoredToken:
+    """Interactive SSO login; returns the stored token or raises NexusError."""
+    if token_url:
+        bundle = parse_token_url(token_url, site_url=settings.base_url if passport else None, passport=passport)
+    else:
+        session = LoginSession(
+            settings.base_url,
+            service=settings.service,
+            url_scheme=settings.url_scheme,
+            config_dir=settings.config_dir,
+            handler_schemes=settings.handler_schemes,
+        )
+        session.prepare(register_handler=not no_handler)
+        _err(f"Nexus MCP login for {settings.base_url}")
+        _err("")
+        _err("1. Sign in through Union's Okta page that opens in your browser (we never see your password).")
+        _err("2. Nexus then shows a green 'Your registration has been confirmed' banner. That is NOT the end:")
+        _err("   the token is in the blue link below it, 'Click here if the app does not open automatically.'")
+        if session.handler_app:
+            _err("3. Click that link and allow 'Open Nexus MCP Login' when the browser asks; this terminal")
+            _err("   receives the token automatically.")
+            _err("   If no prompt appears: right-click the link → Copy Link Address → paste it here → Enter.")
+        else:
+            _err("3. Right-click that link → Copy Link Address → paste it here → Enter.")
+        _err("")
+        _err("Login URL (opens automatically; copy it into a browser if not):")
+        _err("  " + session.launch_url)
+        _err("")
+        if not no_browser:
+            session.open_browser()
+        _err(f"Waiting up to {int(timeout)}s for the login to complete…")
+        bundle = session.wait(timeout=float(timeout))
+    stored = asyncio.run(verify_token(settings, bundle.token))
+    backend = store.save(stored)
+    _err(f"{OK} Signed in to Nexus as {stored.fullname} ({stored.username}); token stored in the {backend}.")
+    _err("  Revoke it any time on https://nexus.union.edu/user/managetoken.php (Preferences → Security keys).")
+    return stored
+
+
 def cmd_login(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
     store = TokenStore(settings.base_url, mode=args.storage or settings.token_storage, config_dir=settings.config_dir)
     try:
-        if args.token_url:
-            bundle = parse_token_url(
-                args.token_url,
-                site_url=settings.base_url if args.passport else None,
-                passport=args.passport,
-            )
-        else:
-            session = LoginSession(
-                settings.base_url,
-                service=settings.service,
-                url_scheme=settings.url_scheme,
-                config_dir=settings.config_dir,
-                handler_schemes=settings.handler_schemes,
-            )
-            session.prepare(register_handler=not args.no_handler)
-            _err(f"Nexus MCP login for {settings.base_url}")
-            _err("")
-            _err("1. Sign in through Union's Okta page that opens in your browser (we never see your password).")
-            _err("2. Nexus then shows a green 'Your registration has been confirmed' banner. That is NOT the end:")
-            _err("   the token is in the blue link below it, 'Click here if the app does not open automatically.'")
-            if session.handler_app:
-                _err("3. Click that link and allow 'Open Nexus MCP Login' when the browser asks; this terminal")
-                _err("   receives the token automatically.")
-                _err("   If no prompt appears: right-click the link → Copy Link Address → paste it here → Enter.")
-            else:
-                _err("3. Right-click that link → Copy Link Address → paste it here → Enter.")
-            _err("")
-            _err("Login URL (opens automatically; copy it into a browser if not):")
-            _err("  " + session.launch_url)
-            _err("")
-            if not args.no_browser:
-                session.open_browser()
-            _err(f"Waiting up to {int(args.timeout)}s for the login to complete…")
-            bundle = session.wait(timeout=float(args.timeout))
-        stored = asyncio.run(verify_token(settings, bundle.token))
-        backend = store.save(stored)
+        run_login(settings, store, no_browser=args.no_browser, no_handler=args.no_handler, token_url=args.token_url, passport=args.passport, timeout=args.timeout)
     except NexusError as exc:
         _err(f"{FAIL} {exc.code}: {exc.message}")
         return 1
     except KeyboardInterrupt:
         _err("\nLogin cancelled.")
         return 130
-    _err(f"{OK} Signed in to Nexus as {stored.fullname} ({stored.username}); token stored in the {backend}.")
-    _err("  Revoke it any time on https://nexus.union.edu/user/managetoken.php (Preferences → Security keys).")
     return 0
 
 
@@ -275,6 +287,91 @@ def cmd_list_courses(args: argparse.Namespace) -> int:
         return 1
 
 
+def _selected_clients(keys: list[str] | None) -> list:
+    if not keys or "detected" in keys:
+        found = detect_clients()
+        if not found:
+            raise ValueError("no supported MCP client was detected; pass --client explicitly (see `nexus-mcp clients`)")
+        return found
+    if "all" in keys:
+        return all_clients()
+    return [get_client(k) for k in keys]
+
+
+def cmd_clients(_args: argparse.Namespace) -> int:
+    command, args = server_command()
+    _err("Launcher that will be written: " + " ".join([command, *args]))
+    _err("")
+    for c in all_clients():
+        mark = OK if c.installed else " "
+        _err(f"{mark} {c.key:15} {c.name:20} {c.path}")
+    _err("")
+    _err("✓ = detected on this machine. `nexus-mcp install --client <key>` writes the config; --client detected does all found.")
+    return 0
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    try:
+        targets = _selected_clients(args.client)
+    except ValueError as exc:
+        _err(f"{FAIL} {exc}")
+        return 1
+    rc = 0
+    for client in targets:
+        try:
+            _err(install(client, remove=args.remove, dry_run=args.dry_run))
+            if not args.dry_run and not args.remove:
+                _err(f"  {client.hint}")
+        except ClientConfigError as exc:
+            rc = 1
+            _err(f"{FAIL} {exc}")
+    return rc
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    """login (if needed) → write client config → test-connection."""
+    settings = Settings.from_env()
+    store = TokenStore(settings.base_url, mode=settings.token_storage, config_dir=settings.config_dir)
+    try:
+        targets = _selected_clients(args.client)
+    except ValueError as exc:
+        _err(f"{FAIL} {exc}")
+        return 1
+    _err(f"Nexus MCP setup → {', '.join(c.name for c in targets)}")
+    _err("")
+    if not args.skip_login:
+        signed_in = False
+        try:
+            token, source = resolve_token(settings)
+            stored = asyncio.run(verify_token(settings, token))
+            _err(f"{OK} Already signed in as {stored.fullname} (token from {source}).")
+            signed_in = True
+        except NexusError:
+            pass
+        if not signed_in:
+            try:
+                run_login(settings, store, no_browser=args.no_browser, no_handler=args.no_handler, timeout=args.timeout)
+            except NexusError as exc:
+                _err(f"{FAIL} {exc.code}: {exc.message}")
+                return 1
+            except KeyboardInterrupt:
+                _err("\nSetup cancelled.")
+                return 130
+        _err("")
+    rc = 0
+    for client in targets:
+        try:
+            _err(f"{OK} " + install(client))
+            _err(f"  {client.hint}")
+        except ClientConfigError as exc:
+            rc = 1
+            _err(f"{FAIL} {exc}")
+    if not args.skip_test:
+        _err("")
+        rc = max(rc, asyncio.run(_test_connection()))
+    return rc
+
+
 def cmd_serve(_args: argparse.Namespace) -> int:
     from .server import main as serve_main
 
@@ -306,6 +403,21 @@ def build_parser() -> argparse.ArgumentParser:
     p_lc.add_argument("--all", action="store_true", help="Include past/future/hidden courses")
     p_lc.add_argument("--json", action="store_true", help="Print JSON")
     p_lc.set_defaults(func=cmd_list_courses)
+    client_keys = [c.key for c in all_clients()] + ["detected", "all"]
+    p_setup = sub.add_parser("setup", help="One-shot onboarding: login if needed, register with your AI client(s), test")
+    p_setup.add_argument("--client", action="append", choices=client_keys, help="Client to configure (repeatable; default: all detected)")
+    p_setup.add_argument("--no-browser", action="store_true", help="Don't open the browser automatically")
+    p_setup.add_argument("--no-handler", action="store_true", help="Don't register the URL-scheme handler")
+    p_setup.add_argument("--skip-login", action="store_true", help="Only write client config and test")
+    p_setup.add_argument("--skip-test", action="store_true", help="Don't run test-connection at the end")
+    p_setup.add_argument("--timeout", type=float, default=600, help="Seconds to wait for the browser login")
+    p_setup.set_defaults(func=cmd_setup)
+    p_install = sub.add_parser("install", help="Write the server entry into an AI client's config (Claude Desktop, Cursor, ...)")
+    p_install.add_argument("--client", action="append", choices=client_keys, help="Client key (repeatable); 'detected' or 'all'")
+    p_install.add_argument("--dry-run", action="store_true", help="Print the snippet instead of writing")
+    p_install.add_argument("--remove", action="store_true", help="Remove the server entry instead")
+    p_install.set_defaults(func=cmd_install)
+    sub.add_parser("clients", help="List supported MCP clients and which are detected").set_defaults(func=cmd_clients)
     sub.add_parser("serve", help="Run the MCP server on stdio (default)").set_defaults(func=cmd_serve)
     return parser
 

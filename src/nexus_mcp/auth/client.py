@@ -375,6 +375,68 @@ def ensure_macos_url_handler(
         return None
 
 
+def _handler_python() -> str:
+    """Interpreter for the Windows/Linux handlers (pythonw on Windows: no console flash)."""
+    exe = Path(sys.executable)
+    if sys.platform.startswith("win"):
+        pyw = exe.with_name("pythonw.exe")
+        if pyw.exists():
+            return str(pyw)
+    return str(exe)
+
+
+def ensure_windows_url_handler(schemes: Sequence[str], config_dir: Path, callback_path: Path) -> Path | None:
+    """Register per-user handlers in HKCU\\Software\\Classes (no admin rights needed)."""
+    if not sys.platform.startswith("win"):
+        return None
+    try:
+        import winreg  # type: ignore[import-not-found]
+
+        command = f'"{_handler_python()}" -m nexus_mcp.auth.callback --out "{callback_path}" "%1"'
+        for scheme in schemes:
+            root = winreg.CreateKey(winreg.HKEY_CURRENT_USER, rf"Software\Classes\{scheme}")
+            winreg.SetValueEx(root, "", 0, winreg.REG_SZ, f"URL:{scheme} protocol")
+            winreg.SetValueEx(root, "URL Protocol", 0, winreg.REG_SZ, "")
+            cmd_key = winreg.CreateKey(root, r"shell\open\command")
+            winreg.SetValueEx(cmd_key, "", 0, winreg.REG_SZ, command)
+        return Path("HKCU:/Software/Classes")
+    except Exception:
+        return None
+
+
+def ensure_linux_url_handler(schemes: Sequence[str], config_dir: Path, callback_path: Path) -> Path | None:
+    """Register an ``x-scheme-handler`` .desktop entry via xdg-mime."""
+    if not sys.platform.startswith("linux") or not shutil.which("xdg-mime"):
+        return None
+    try:
+        apps = Path(os.environ.get("XDG_DATA_HOME") or (Path.home() / ".local" / "share")) / "applications"
+        apps.mkdir(parents=True, exist_ok=True)
+        desktop = apps / "nexus-mcp-login.desktop"
+        mime = "".join(f"x-scheme-handler/{s};" for s in schemes)
+        desktop.write_text(
+            "[Desktop Entry]\nType=Application\nName=Nexus MCP Login\n"
+            f"Exec={_handler_python()} -m nexus_mcp.auth.callback --out \"{callback_path}\" %u\n"
+            f"NoDisplay=true\nTerminal=false\nMimeType={mime}\n",
+            "utf-8",
+        )
+        for scheme in schemes:
+            subprocess.run(["xdg-mime", "default", desktop.name, f"x-scheme-handler/{scheme}"], capture_output=True)
+        if shutil.which("update-desktop-database"):
+            subprocess.run(["update-desktop-database", str(apps)], capture_output=True)
+        return desktop
+    except Exception:
+        return None
+
+
+def ensure_url_handler(schemes: Sequence[str], config_dir: Path, callback_path: Path) -> Path | None:
+    """Register the OS handler for the token link on the current platform (None = paste flow only)."""
+    if sys.platform == "darwin":
+        return ensure_macos_url_handler(schemes, config_dir, callback_path)
+    if sys.platform.startswith("win"):
+        return ensure_windows_url_handler(schemes, config_dir, callback_path)
+    return ensure_linux_url_handler(schemes, config_dir, callback_path)
+
+
 def wait_for_callback(
     callback_path: Path,
     *,
@@ -434,7 +496,7 @@ class LoginSession:
         self.callback_path.unlink(missing_ok=True)
         if register_handler:
             schemes = [self.url_scheme] + [x for x in self.handler_schemes if x != self.url_scheme]
-            self.handler_app = ensure_macos_url_handler(schemes, self.config_dir, self.callback_path)
+            self.handler_app = ensure_url_handler(schemes, self.config_dir, self.callback_path)
 
     def open_browser(self) -> bool:
         try:

@@ -1,11 +1,22 @@
 [project]
-name = "nexus-mcp"
+name = "union-nexus-mcp"
 version = "0.1.0"
-description = "Read-only MCP server for Union College's Nexus (Moodle) LMS"
+description = "Read-only MCP server for Union College's Nexus (Moodle) LMS: courses, assignments, grades, materials, calendar, briefings"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-authors = [{ name = "Lin" }]
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "James Lin" }]
+keywords = ["mcp", "moodle", "nexus", "union-college", "model-context-protocol", "lms"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Education",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Education",
+    "Environment :: Console",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "mcp>=2.2.0",
     "httpx>=0.27",
@@ -18,8 +29,14 @@ dependencies = [
 [project.optional-dependencies]
 pdf = ["pypdf>=4.0"]
 
+[project.urls]
+Homepage = "https://github.com/linboxin/nexus-mcp"
+Repository = "https://github.com/linboxin/nexus-mcp"
+Issues = "https://github.com/linboxin/nexus-mcp/issues"
+
 [project.scripts]
 nexus-mcp = "nexus_mcp.cli:main"
+union-nexus-mcp = "nexus_mcp.cli:main"
 
 [dependency-groups]
 dev = [
