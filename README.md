@@ -1,5 +1,7 @@
 # Nexus MCP
 
+[![CI](https://github.com/linboxin/nexus-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/linboxin/nexus-mcp/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/union-nexus-mcp)](https://pypi.org/project/union-nexus-mcp/) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A read-only [MCP](https://modelcontextprotocol.io) server for Union College's **Nexus** (Moodle 4.5, hosted by Open LMS). Connect it to Claude and ask:
 
 > "What's due this week?" · "What's overdue?" · "Did I submit Lab 3?" · "What's my grade in CSC-385?" · "What changed in my courses today?" · "Find the lecture notes on shaders." · "Give me my daily briefing." · "What should I work on next?"
@@ -93,7 +95,7 @@ Copy `.env.example` to `.env` if you need to change anything. Defaults target `n
 - Third-party activities (Turnitin, H5P, LTI) appear as modules without readable content.
 - Non-academic enrolments (trainings, campus resources) never end, so they count as "in progress"; use `academic_only` to hide them.
 
-More: [docs/API_FEASIBILITY.md](docs/API_FEASIBILITY.md) (what Nexus exposes and why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+More: [docs/API_FEASIBILITY.md](docs/API_FEASIBILITY.md) (what Nexus exposes and why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [CHANGELOG.md](CHANGELOG.md).
 
 <!-- MCP registry ownership marker -->
 mcp-name: io.github.linboxin/nexus-mcp
