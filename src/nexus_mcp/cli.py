@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 import time
@@ -375,19 +376,91 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return rc
 
 
+def _loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "localhost", "::1")
+
+
 def cmd_serve(args: argparse.Namespace) -> int:
     from .server import serve
 
     transport = getattr(args, "transport", "stdio")
-    if transport == "http":
-        host = args.host
-        if host not in ("127.0.0.1", "localhost", "::1"):
-            _err(f"WARNING: serving without authentication on {host}:{args.port}; anyone who can reach this port")
-            _err("         can read your Nexus data. Keep it on localhost or behind Tailscale/SSH.")
-        _err(f"Nexus MCP (streamable HTTP) on http://{host}:{args.port}/mcp")
-        serve("http", host=host, port=args.port)
-    else:
+    if transport != "http":
         serve("stdio")
+        return 0
+    token = args.auth_token or os.environ.get("NEXUS_HTTP_TOKEN") or None
+    if not token and not _loopback(args.host):
+        _err(f"{FAIL} Refusing to serve unauthenticated on {args.host}. Pass --auth-token (or NEXUS_HTTP_TOKEN),")
+        _err("  or use `nexus-mcp expose`, which sets one up and opens a tunnel for you.")
+        return 2
+    if token:
+        _err(f"Nexus MCP (streamable HTTP, bearer auth) on http://{args.host}:{args.port}/mcp")
+    else:
+        _err(f"Nexus MCP (streamable HTTP, NO auth, localhost only) on http://{args.host}:{args.port}/mcp")
+    serve("http", host=args.host, port=args.port, auth_token=token, public_url=args.public_url, stateless=args.stateless)
+    return 0
+
+
+def cmd_expose(args: argparse.Namespace) -> int:
+    """HTTP server + Cloudflare quick tunnel, printing what to paste into Grok Bot."""
+    import shutil
+    import subprocess
+    import threading
+
+    from .http_auth import find_tunnel_url, load_or_create_http_token
+    from .server import serve
+
+    cloudflared = shutil.which("cloudflared")
+    if not cloudflared:
+        _err(f"{FAIL} cloudflared not found. Install it (`brew install cloudflared`) or run")
+        _err("  `nexus-mcp serve --transport http --auth-token …` behind your own tunnel (ngrok, Tailscale Funnel).")
+        return 1
+    settings = Settings.from_env()
+    token = args.auth_token or os.environ.get("NEXUS_HTTP_TOKEN") or load_or_create_http_token(settings.config_dir, rotate=args.new_token)
+
+    proc = subprocess.Popen(
+        [cloudflared, "tunnel", "--url", f"http://127.0.0.1:{args.port}", "--no-autoupdate"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+    )
+    found = threading.Event()
+    url_box: dict[str, str] = {}
+
+    def _drain() -> None:  # keep the pipe drained; capture the public URL
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            if "url" not in url_box:
+                hit = find_tunnel_url(line)
+                if hit:
+                    url_box["url"] = hit
+                    found.set()
+        found.set()
+
+    threading.Thread(target=_drain, daemon=True).start()
+    _err("Starting Cloudflare quick tunnel…")
+    found.wait(timeout=90)
+    url = url_box.get("url")
+    if not url:
+        proc.terminate()
+        _err(f"{FAIL} cloudflared did not report a public URL (network blocked?). Try again or run it by hand:")
+        _err(f"  cloudflared tunnel --url http://127.0.0.1:{args.port}")
+        return 1
+    _err("")
+    _err(f"{OK} Public endpoint ready. In Grok Bot: Settings → Plugins → add a custom MCP connector:")
+    _err("")
+    _err(f"  Server URL:  {url}/mcp")
+    _err(f"  Header:      Authorization: Bearer {token}")
+    _err("")
+    _err("Any remote MCP client (Claude.ai custom connector, ChatGPT, hosted agents) takes the same two values.")
+    _err(f"The token lives in {settings.config_dir / 'http-token.txt'} (rotate with --new-token). Quick-tunnel URLs")
+    _err("change every run; see docs/REMOTE.md for a stable hostname. Keep this terminal open; Ctrl-C stops both.")
+    _err("")
+    try:
+        serve("http", host="127.0.0.1", port=args.port, auth_token=token, public_url=url, stateless=args.stateless)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc.terminate()
     return 0
 
 
@@ -577,7 +650,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--transport", choices=["stdio", "http"], default="stdio", help="stdio for local clients; http = streamable HTTP at /mcp")
     p_serve.add_argument("--host", default="127.0.0.1")
     p_serve.add_argument("--port", type=int, default=8765)
+    p_serve.add_argument("--auth-token", help="Require 'Authorization: Bearer <token>' on HTTP (or set NEXUS_HTTP_TOKEN)")
+    p_serve.add_argument("--public-url", help="Public base URL when behind a tunnel/proxy (for auth metadata)")
+    p_serve.add_argument("--stateless", action="store_true", help="Stateless JSON responses (no SSE); helps some hosted clients")
     p_serve.set_defaults(func=cmd_serve)
+    p_exp = sub.add_parser("expose", help="Serve over HTTPS for remote agents (Grok Bot, Claude.ai, ChatGPT): bearer auth + Cloudflare quick tunnel")
+    p_exp.add_argument("--port", type=int, default=8765)
+    p_exp.add_argument("--auth-token", help="Use this bearer token instead of the stored one")
+    p_exp.add_argument("--new-token", action="store_true", help="Rotate the stored bearer token")
+    p_exp.add_argument("--stateless", action="store_true", help="Stateless JSON responses (try if a client can't keep a session)")
+    p_exp.set_defaults(func=cmd_expose)
 
     # agent-facing commands
     p_call = sub.add_parser("call", help="Call any MCP tool from the shell: call upcoming_assignments days=7 (JSON out)")

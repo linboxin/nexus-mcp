@@ -37,7 +37,20 @@ async def _lifespan(_server: MCPServer) -> AsyncIterator[dict]:
         await runtime.close()
 
 
-def create_server() -> MCPServer:
+def create_server(*, auth_token: str | None = None, public_url: str | None = None) -> MCPServer:
+    """Build the server. With ``auth_token`` every HTTP request must carry
+    ``Authorization: Bearer <auth_token>`` (the SDK answers 401 otherwise)."""
+    extra: dict = {}
+    if auth_token:
+        from mcp.server.auth.settings import AuthSettings
+
+        from .http_auth import StaticTokenVerifier
+
+        base = (public_url or "http://127.0.0.1:8765").rstrip("/")
+        extra = {
+            "token_verifier": StaticTokenVerifier(auth_token),
+            "auth": AuthSettings(issuer_url=base, resource_server_url=base + "/mcp"),
+        }
     server = MCPServer(
         "nexus-mcp",
         title="Nexus (Union College Moodle)",
@@ -45,19 +58,33 @@ def create_server() -> MCPServer:
         instructions=INSTRUCTIONS,
         lifespan=_lifespan,
         log_level="WARNING",  # keep stderr quiet: httpx would otherwise log every request at INFO
+        **extra,
     )
     register_all(server)
     return server
 
 
-def serve(transport: str = "stdio", *, host: str = "127.0.0.1", port: int = 8765) -> None:
-    """Run the server. ``stdio`` for local clients; ``http`` = streamable HTTP at ``/mcp``
-    (no authentication: bind to localhost or put it behind Tailscale/SSH)."""
-    server = create_server()
+def serve(
+    transport: str = "stdio",
+    *,
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    auth_token: str | None = None,
+    public_url: str | None = None,
+    stateless: bool = False,
+) -> None:
+    """Run the server. ``stdio`` for local clients; ``http`` = streamable HTTP at ``/mcp``.
+
+    Without ``auth_token`` the HTTP door is open: bind to localhost only. With it,
+    requests need ``Authorization: Bearer <auth_token>`` (what remote agents send).
+    ``stateless`` answers each request independently (plain JSON, no SSE), which
+    some hosted clients and tunnels handle better.
+    """
     if transport == "http":
-        server.run(transport="streamable-http", host=host, port=port)
+        server = create_server(auth_token=auth_token, public_url=public_url or f"http://{host}:{port}")
+        server.run(transport="streamable-http", host=host, port=port, stateless_http=stateless, json_response=stateless)
     else:
-        server.run(transport="stdio")
+        create_server().run(transport="stdio")
 
 
 def main() -> None:
