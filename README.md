@@ -41,6 +41,17 @@ Pick clients explicitly with `uvx union-nexus-mcp setup --client claude-desktop 
 
 GUI apps often can't see `uvx` on their PATH; `install` writes the absolute path for you (`which uvx` if editing manually).
 
+## Use it from any agent
+
+One service layer, three doors:
+
+| Agent | How |
+|---|---|
+| MCP clients (Claude Desktop/Code, Cursor, Windsurf, VS Code, Gemini, Codex, custom MCP clients) | `uvx union-nexus-mcp setup` — stdio server, tools listed above |
+| Command-driven agents, scripts, cron | `uvx union-nexus-mcp briefing`, `due --days 7`, `overdue`, `next`, `grades`, `events`, `search <q>`, `updates --since 24h`, or `call <tool> key=value` for any tool. JSON out. `uvx union-nexus-mcp skill install` drops a skill file into `~/.claude/skills` so Claude Code knows the commands. |
+| Your own Python agent | `from nexus_mcp.moodle.nexus import Nexus` → `Nexus.from_settings(Settings.from_env(), token)` gives every operation as async methods, no protocol in between. |
+| Remote or web-based agents | `uvx union-nexus-mcp serve --transport http --port 8765` exposes streamable HTTP at `/mcp`. No auth is built in: keep it on localhost or behind Tailscale/SSH; do not run it as a shared service holding other people's tokens. |
+
 ## Commands
 
 ```bash
@@ -49,6 +60,8 @@ uvx union-nexus-mcp login              # sign in again (token expired / new mach
 uvx union-nexus-mcp test-connection    # reachability, auth, identity, capability matrix
 uvx union-nexus-mcp list-courses       # --all includes past terms
 uvx union-nexus-mcp install --client cursor --dry-run
+uvx union-nexus-mcp tools                  # every MCP tool with its parameters
+uvx union-nexus-mcp call daily_briefing --text
 uvx union-nexus-mcp logout
 ```
 
@@ -80,3 +93,6 @@ Copy `.env.example` to `.env` if you need to change anything. Defaults target `n
 - Non-academic enrolments (trainings, campus resources) never end, so they count as "in progress"; use `academic_only` to hide them.
 
 More: [docs/API_FEASIBILITY.md](docs/API_FEASIBILITY.md) (what Nexus exposes and why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+<!-- MCP registry ownership marker -->
+mcp-name: io.github.linboxin/nexus-mcp

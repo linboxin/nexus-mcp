@@ -44,13 +44,24 @@ def create_server() -> MCPServer:
         version=__version__,
         instructions=INSTRUCTIONS,
         lifespan=_lifespan,
+        log_level="WARNING",  # keep stderr quiet: httpx would otherwise log every request at INFO
     )
     register_all(server)
     return server
 
 
+def serve(transport: str = "stdio", *, host: str = "127.0.0.1", port: int = 8765) -> None:
+    """Run the server. ``stdio`` for local clients; ``http`` = streamable HTTP at ``/mcp``
+    (no authentication: bind to localhost or put it behind Tailscale/SSH)."""
+    server = create_server()
+    if transport == "http":
+        server.run(transport="streamable-http", host=host, port=port)
+    else:
+        server.run(transport="stdio")
+
+
 def main() -> None:
-    create_server().run(transport="stdio")
+    serve("stdio")
 
 
 if __name__ == "__main__":  # pragma: no cover

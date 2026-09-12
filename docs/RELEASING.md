@@ -50,3 +50,18 @@ uvx union-nexus-mcp clients
 - `uv run pytest` green, `uv build` succeeds
 - version bumped in `pyproject.toml` and `src/nexus_mcp/__init__.py`
 - README setup instructions still match the CLI
+
+## Optional: list it in the MCP registry
+
+`server.json` describes the server for the official registry
+(registry.modelcontextprotocol.io), which clients use for discovery. The README
+carries the ownership marker `mcp-name: io.github.linboxin/nexus-mcp` that the
+registry checks against the PyPI package. After a PyPI release:
+
+```bash
+brew install mcp-publisher            # or download from github.com/modelcontextprotocol/registry
+mcp-publisher login github            # proves you own the io.github.linboxin namespace
+mcp-publisher publish                 # validates server.json and publishes
+```
+
+Bump `version` in `server.json` alongside `pyproject.toml` for each release.

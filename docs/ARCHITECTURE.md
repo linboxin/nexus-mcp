@@ -103,3 +103,15 @@ that zone; "today"/"tomorrow" boundaries use it too.
 
 `tests/` mock Moodle at the HTTP layer with `respx` (`FakeMoodle` in
 `conftest.py` routes on `wsfunction`). No network, no credentials.
+
+## Doors into the service layer
+
+The MCP layer is deliberately thin so the same service layer serves several
+kinds of agent:
+
+| Door | Entry point | Notes |
+|---|---|---|
+| MCP stdio | `nexus_mcp.server.serve("stdio")` via `nexus-mcp serve` | Default; every tool is an async function over `runtime.get_nexus()`. |
+| MCP streamable HTTP | `serve("http", host, port)` via `nexus-mcp serve --transport http` | Same tools at `/mcp`; unauthenticated, localhost/Tailscale only. |
+| CLI (JSON) | `nexus-mcp call <tool> key=value`, plus aliases `briefing`, `due`, `overdue`, `next`, `grades`, `events`, `search`, `updates`, `courses` | Goes through `MCPServer.call_tool`, so CLI and MCP behave identically. `nexus-mcp skill install` gives command-driven agents a SKILL.md. |
+| Python | `Nexus.from_settings(settings, token)` | Direct use of the service layer; the intelligence module is plain functions over it. |

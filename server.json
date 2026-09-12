@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "io.github.linboxin/nexus-mcp",
+  "description": "Read-only MCP server for Union College's Nexus (Moodle): courses, assignments, grades, materials, calendar, briefings",
+  "repository": {
+    "url": "https://github.com/linboxin/nexus-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "union-nexus-mcp",
+      "version": "0.2.0",
+      "runtimeHint": "uvx",
+      "transport": { "type": "stdio" }
+    }
+  ]
+}

@@ -1,4 +1,5 @@
-"""``nexus-mcp`` command line: login, logout, test-connection, whoami, list-courses, serve."""
+"""``nexus-mcp`` command line: onboarding (login/setup/install), diagnostics, and an agent-facing
+CLI where every MCP tool is also a command with JSON output (``call``, ``briefing``, ``due`` ...)."""
 
 from __future__ import annotations
 
@@ -6,10 +7,12 @@ import argparse
 import asyncio
 import json
 import sys
+from pathlib import Path
 import time
 from typing import Any
 
 from . import __version__
+from . import runtime
 from .auth import LoginSession, StoredToken, TokenStore, parse_token_url, resolve_token
 from .clients import ClientConfigError, all_clients, detect_clients, get_client, install, server_command
 from .config import Settings
@@ -372,10 +375,162 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return rc
 
 
-def cmd_serve(_args: argparse.Namespace) -> int:
-    from .server import main as serve_main
+def cmd_serve(args: argparse.Namespace) -> int:
+    from .server import serve
 
-    serve_main()
+    transport = getattr(args, "transport", "stdio")
+    if transport == "http":
+        host = args.host
+        if host not in ("127.0.0.1", "localhost", "::1"):
+            _err(f"WARNING: serving without authentication on {host}:{args.port}; anyone who can reach this port")
+            _err("         can read your Nexus data. Keep it on localhost or behind Tailscale/SSH.")
+        _err(f"Nexus MCP (streamable HTTP) on http://{host}:{args.port}/mcp")
+        serve("http", host=host, port=args.port)
+    else:
+        serve("stdio")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Agent-facing CLI: every MCP tool as a command, JSON out. `call` is generic;
+# `briefing`, `due`, `overdue`, `next`, `grades`, `events`, `search`, `updates`,
+# `courses` are short aliases for the common questions.
+# --------------------------------------------------------------------------- #
+
+
+def _parse_kv(pairs: list[str] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for pair in pairs or []:
+        if "=" not in pair:
+            raise ValueError(f"expected key=value, got {pair!r}")
+        key, raw = pair.split("=", 1)
+        try:
+            out[key] = json.loads(raw)
+        except ValueError:
+            out[key] = raw
+    return out
+
+
+async def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any] | str:
+    import logging
+
+    from .server import create_server
+
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    server = create_server()
+    try:
+        result = await server.call_tool(name, arguments)
+    finally:
+        await runtime.close()
+    structured = getattr(result, "structured_content", None)
+    if structured is not None:
+        return structured
+    texts = [getattr(block, "text", "") for block in (getattr(result, "content", None) or [])]
+    return "\n".join(t for t in texts if t)
+
+
+def _emit(result: dict[str, Any] | str, *, as_json: bool) -> None:
+    if isinstance(result, dict):
+        if not as_json and isinstance(result.get("text"), str):
+            print(result["text"])
+            return
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(result)
+
+
+def run_tool(name: str, arguments: dict[str, Any], *, as_json: bool) -> int:
+    from mcp.server.mcpserver.exceptions import ToolError
+
+    try:
+        result = asyncio.run(_call_tool(name, arguments))
+    except ToolError as exc:
+        _err(f"{FAIL} {exc}")
+        return 1
+    except NexusError as exc:
+        _err(f"{FAIL} {exc.code}: {exc.message}")
+        return 1
+    _emit(result, as_json=as_json)
+    return 0
+
+
+def _opt(**kwargs: Any) -> dict[str, Any]:
+    return {k: v for k, v in kwargs.items() if v is not None}
+
+
+def cmd_call(args: argparse.Namespace) -> int:
+    try:
+        arguments = _parse_kv(args.args)
+    except ValueError as exc:
+        _err(f"{FAIL} {exc}")
+        return 2
+    return run_tool(args.tool, arguments, as_json=not args.text)
+
+
+def cmd_tools(_args: argparse.Namespace) -> int:
+    from .server import create_server
+
+    async def _list() -> list:
+        return await create_server().list_tools()
+
+    for tool in asyncio.run(_list()):
+        params = list((tool.input_schema or {}).get("properties", {}).keys())
+        first = (tool.description or "").strip().splitlines()[0] if tool.description else ""
+        print(f"{tool.name}({', '.join(params)})\n    {first}")
+    return 0
+
+
+def cmd_briefing(args: argparse.Namespace) -> int:
+    if args.weekly:
+        return run_tool("weekly_briefing", {"days": args.days}, as_json=args.json)
+    return run_tool("daily_briefing", {}, as_json=args.json)
+
+
+def cmd_due(args: argparse.Namespace) -> int:
+    return run_tool("upcoming_assignments", _opt(days=args.days, course_id=args.course, include_submitted=not args.pending), as_json=True)
+
+
+def cmd_overdue(args: argparse.Namespace) -> int:
+    return run_tool("overdue_assignments", _opt(course_id=args.course), as_json=True)
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    return run_tool("what_should_i_do_next", {}, as_json=args.json)
+
+
+def cmd_grades(args: argparse.Namespace) -> int:
+    if args.course_id:
+        return run_tool("course_grade", {"course_id": args.course_id}, as_json=True)
+    return run_tool("current_grades", {}, as_json=True)
+
+
+def cmd_events(args: argparse.Namespace) -> int:
+    return run_tool("upcoming_events", _opt(days=args.days, course_id=args.course), as_json=True)
+
+
+def cmd_search(args: argparse.Namespace) -> int:
+    return run_tool("search_course_materials", _opt(query=" ".join(args.query), course_id=args.course), as_json=True)
+
+
+def cmd_updates(args: argparse.Namespace) -> int:
+    return run_tool("course_updates", _opt(since=args.since, course_id=args.course), as_json=True)
+
+
+def cmd_courses(args: argparse.Namespace) -> int:
+    return run_tool("list_courses", {"classification": "all" if args.all else "inprogress", "academic_only": args.academic}, as_json=True)
+
+
+def cmd_skill(args: argparse.Namespace) -> int:
+    from importlib import resources
+
+    text = resources.files("nexus_mcp.skill").joinpath("SKILL.md").read_text("utf-8")
+    if args.action == "show":
+        print(text)
+        return 0
+    target_dir = Path(args.dir).expanduser() if args.dir else Path.home() / ".claude" / "skills" / "nexus"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / "SKILL.md").write_text(text, "utf-8")
+    _err(f"{OK} Skill written to {target_dir / 'SKILL.md'} (Claude Code loads personal skills from ~/.claude/skills).")
     return 0
 
 
@@ -418,7 +573,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_install.add_argument("--remove", action="store_true", help="Remove the server entry instead")
     p_install.set_defaults(func=cmd_install)
     sub.add_parser("clients", help="List supported MCP clients and which are detected").set_defaults(func=cmd_clients)
-    sub.add_parser("serve", help="Run the MCP server on stdio (default)").set_defaults(func=cmd_serve)
+    p_serve = sub.add_parser("serve", help="Run the MCP server (default: stdio)")
+    p_serve.add_argument("--transport", choices=["stdio", "http"], default="stdio", help="stdio for local clients; http = streamable HTTP at /mcp")
+    p_serve.add_argument("--host", default="127.0.0.1")
+    p_serve.add_argument("--port", type=int, default=8765)
+    p_serve.set_defaults(func=cmd_serve)
+
+    # agent-facing commands
+    p_call = sub.add_parser("call", help="Call any MCP tool from the shell: call upcoming_assignments days=7 (JSON out)")
+    p_call.add_argument("tool")
+    p_call.add_argument("args", nargs="*", help="key=value (values parsed as JSON when possible)")
+    p_call.add_argument("--text", action="store_true", help="Print the tool's text summary instead of JSON when it has one")
+    p_call.set_defaults(func=cmd_call)
+    sub.add_parser("tools", help="List the MCP tools and their parameters").set_defaults(func=cmd_tools)
+    p_b = sub.add_parser("briefing", help="Daily academic briefing (--weekly for the next 7 days)")
+    p_b.add_argument("--weekly", action="store_true")
+    p_b.add_argument("--days", type=int, default=7)
+    p_b.add_argument("--json", action="store_true")
+    p_b.set_defaults(func=cmd_briefing)
+    p_due = sub.add_parser("due", help="Upcoming assignments with submission status")
+    p_due.add_argument("--days", type=int, default=7)
+    p_due.add_argument("--course", type=int)
+    p_due.add_argument("--pending", action="store_true", help="Hide already-submitted work")
+    p_due.set_defaults(func=cmd_due)
+    p_od = sub.add_parser("overdue", help="Overdue assignments")
+    p_od.add_argument("--course", type=int)
+    p_od.set_defaults(func=cmd_overdue)
+    p_next = sub.add_parser("next", help="Prioritised to-do list with reasons")
+    p_next.add_argument("--json", action="store_true")
+    p_next.set_defaults(func=cmd_next)
+    p_gr = sub.add_parser("grades", help="Current grades (all courses, or one course id)")
+    p_gr.add_argument("course_id", nargs="?", type=int)
+    p_gr.set_defaults(func=cmd_grades)
+    p_ev = sub.add_parser("events", help="Upcoming calendar events")
+    p_ev.add_argument("--days", type=int, default=14)
+    p_ev.add_argument("--course", type=int)
+    p_ev.set_defaults(func=cmd_events)
+    p_se = sub.add_parser("search", help="Search course materials")
+    p_se.add_argument("query", nargs="+")
+    p_se.add_argument("--course", type=int)
+    p_se.set_defaults(func=cmd_search)
+    p_up = sub.add_parser("updates", help="What changed in your courses since a time (24h, 2d, ISO, ...)")
+    p_up.add_argument("--since", default="24h")
+    p_up.add_argument("--course", type=int)
+    p_up.set_defaults(func=cmd_updates)
+    p_co = sub.add_parser("courses", help="Courses as JSON (--all includes past terms, --academic hides trainings)")
+    p_co.add_argument("--all", action="store_true")
+    p_co.add_argument("--academic", action="store_true")
+    p_co.set_defaults(func=cmd_courses)
+    p_sk = sub.add_parser("skill", help="Show or install the agent skill file (for CLI-driven agents like Claude Code)")
+    p_sk.add_argument("action", choices=["show", "install"])
+    p_sk.add_argument("--dir", help="Install directory (default ~/.claude/skills/nexus)")
+    p_sk.set_defaults(func=cmd_skill)
     return parser
 
 
