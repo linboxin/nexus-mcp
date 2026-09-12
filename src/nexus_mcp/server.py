@@ -5,6 +5,8 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
 
+from urllib.parse import urlparse
+
 from mcp.server.mcpserver import MCPServer
 
 from . import __version__, runtime
@@ -64,6 +66,27 @@ def create_server(*, auth_token: str | None = None, public_url: str | None = Non
     return server
 
 
+def transport_security(public_url: str | None, host: str, port: int):
+    """DNS-rebinding protection that also admits the public hostname.
+
+    The SDK only accepts Host headers matching the bind address by default, so
+    requests arriving through a tunnel (Host: xyz.trycloudflare.com) were
+    rejected with 421. Bearer auth still gates everything.
+    """
+    from mcp.server.transport_security import TransportSecuritySettings
+
+    hosts = {f"{host}:*", host, "127.0.0.1:*", "localhost:*"}
+    origins = {f"http://{host}:{port}", f"http://127.0.0.1:{port}", f"http://localhost:{port}"}
+    if public_url:
+        parsed = urlparse(public_url)
+        if parsed.hostname:
+            hosts.update({parsed.hostname, f"{parsed.hostname}:*"})
+            origins.add(f"{parsed.scheme}://{parsed.netloc}")
+    return TransportSecuritySettings(
+        enable_dns_rebinding_protection=True, allowed_hosts=sorted(hosts), allowed_origins=sorted(origins)
+    )
+
+
 def serve(
     transport: str = "stdio",
     *,
@@ -82,7 +105,14 @@ def serve(
     """
     if transport == "http":
         server = create_server(auth_token=auth_token, public_url=public_url or f"http://{host}:{port}")
-        server.run(transport="streamable-http", host=host, port=port, stateless_http=stateless, json_response=stateless)
+        server.run(
+            transport="streamable-http",
+            host=host,
+            port=port,
+            stateless_http=stateless,
+            json_response=stateless,
+            transport_security=transport_security(public_url, host, port),
+        )
     else:
         create_server().run(transport="stdio")
 

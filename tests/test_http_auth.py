@@ -42,3 +42,15 @@ def test_serve_refuses_public_bind_without_token(capsys, monkeypatch):
     args = cli.build_parser().parse_args(["serve", "--transport", "http", "--host", "0.0.0.0"])
     assert args.func(args) == 2
     assert "Refusing" in capsys.readouterr().err
+
+
+def test_transport_security_admits_tunnel_host():
+    from nexus_mcp.server import transport_security
+
+    ts = transport_security("https://tidy-lamp-42.trycloudflare.com", "127.0.0.1", 8765)
+    assert ts.enable_dns_rebinding_protection
+    assert "tidy-lamp-42.trycloudflare.com" in ts.allowed_hosts and "tidy-lamp-42.trycloudflare.com:*" in ts.allowed_hosts
+    assert "127.0.0.1:*" in ts.allowed_hosts and "localhost:*" in ts.allowed_hosts
+    assert "https://tidy-lamp-42.trycloudflare.com" in ts.allowed_origins
+    local = transport_security(None, "127.0.0.1", 8765)
+    assert not any("trycloudflare" in h for h in local.allowed_hosts)
