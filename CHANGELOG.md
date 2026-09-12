@@ -9,6 +9,7 @@
 - Windows and Linux URL-scheme handlers for the SSO login (untested on those platforms; paste fallback remains).
 - Course `term` and `academic` fields parsed from Union short names; `academic_only` filter.
 - MCP registry manifest (`server.json`).
+- `token export` / `token import` to move the Nexus token to a bot's computer or a server (docs/BOT_COMPUTER.md).
 
 ## 0.1.0 (2026-09-12)
 

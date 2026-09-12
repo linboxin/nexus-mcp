@@ -80,3 +80,28 @@ def test_skill_install_and_show(tmp_path, capsys):
 def test_serve_parser_defaults():
     args = cli.build_parser().parse_args(["serve", "--transport", "http", "--port", "9000"])
     assert args.transport == "http" and args.host == "127.0.0.1" and args.port == 9000
+
+
+def test_token_export_formats(monkeypatch, capsys):
+    monkeypatch.setenv("NEXUS_TOKEN", "a" * 32)
+    monkeypatch.setenv("NEXUS_URL", "https://nexus.test")
+    rc, out, err = _run(capsys, ["token", "export"])
+    assert rc == 0 and out == "NEXUS_URL=https://nexus.test\nNEXUS_TOKEN=" + "a" * 32 + "\n"
+    assert "FULL access" in err and "a" * 32 not in err
+    rc, out, _ = _run(capsys, ["token", "export", "--format", "raw"])
+    assert out.strip() == "a" * 32
+    rc, out, _ = _run(capsys, ["token", "export", "--format", "json"])
+    assert json.loads(out)["NEXUS_TOKEN"] == "a" * 32
+
+
+def test_token_import_stores_verified_token(fake, tmp_path, monkeypatch, capsys):
+    from tests.conftest import TOKEN
+
+    monkeypatch.delenv("NEXUS_TOKEN", raising=False)
+    monkeypatch.setenv("NEXUS_URL", "https://nexus.test")
+    monkeypatch.setenv("NEXUS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setenv("NEXUS_TOKEN_STORAGE", "file")
+    monkeypatch.setattr("sys.stdin", __import__("io").StringIO(TOKEN + "\n"))
+    rc, _, err = _run(capsys, ["token", "import"])
+    assert rc == 0 and "stored in the file" in err
+    assert TOKEN in (tmp_path / "credentials.json").read_text()

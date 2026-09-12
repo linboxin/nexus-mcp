@@ -53,6 +53,7 @@ One service layer, three doors:
 | Command-driven agents, scripts, cron | `uvx union-nexus-mcp briefing`, `due --days 7`, `overdue`, `next`, `grades`, `events`, `search <q>`, `updates --since 24h`, or `call <tool> key=value` for any tool. JSON out. `uvx union-nexus-mcp skill install` drops a skill file into `~/.claude/skills` so Claude Code knows the commands. |
 | Your own Python agent | `from nexus_mcp.moodle.nexus import Nexus` → `Nexus.from_settings(Settings.from_env(), token)` gives every operation as async methods, no protocol in between. |
 | Remote agents (Grok Bot, Claude.ai / ChatGPT custom connectors, hosted assistants) | `uvx union-nexus-mcp expose` — serves over a Cloudflare tunnel with a bearer token and prints the two values to paste (Server URL + `Authorization: Bearer …`). Your Nexus token never leaves the machine. Details and a stable-hostname setup: [docs/REMOTE.md](docs/REMOTE.md). |
+| Agents with their own computer (Grok Bot, Codex cloud, a VPS cron job) | Install the package there and use the CLI: `uvx union-nexus-mcp token export` on your Mac, paste the two lines into the bot's `~/.config/nexus-mcp/.env`, done. Recipe to paste into the bot: [docs/BOT_COMPUTER.md](docs/BOT_COMPUTER.md). |
 
 ## Commands
 

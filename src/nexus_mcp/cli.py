@@ -593,6 +593,42 @@ def cmd_courses(args: argparse.Namespace) -> int:
     return run_tool("list_courses", {"classification": "all" if args.all else "inprogress", "academic_only": args.academic}, as_json=True)
 
 
+def cmd_token(args: argparse.Namespace) -> int:
+    """Move the Nexus token to another machine (a bot's computer, a server) without re-running SSO."""
+    settings = Settings.from_env()
+    if args.action == "export":
+        try:
+            token, source = resolve_token(settings)
+        except NexusError as exc:
+            _err(f"{FAIL} {exc.code}: {exc.message}")
+            return 1
+        _err(f"# Nexus token (from {source}). It grants FULL access to your Nexus account, not just reads:")
+        _err("# treat it like your password, paste it only into the machine that will use it,")
+        _err("# and revoke it on https://nexus.union.edu/user/managetoken.php if it ever leaks.")
+        if args.format == "raw":
+            print(token)
+        elif args.format == "json":
+            print(json.dumps({"NEXUS_TOKEN": token, "NEXUS_URL": settings.base_url}))
+        else:
+            print(f"NEXUS_URL={settings.base_url}")
+            print(f"NEXUS_TOKEN={token}")
+        return 0
+    # import: read NEXUS_TOKEN from the environment or stdin, verify it, store it locally.
+    token = os.environ.get("NEXUS_TOKEN") or (sys.stdin.readline().strip() if not sys.stdin.isatty() else "")
+    if not token:
+        _err(f"{FAIL} Provide the token via NEXUS_TOKEN or on stdin: `echo <token> | nexus-mcp token import`")
+        return 2
+    try:
+        stored = asyncio.run(verify_token(settings, token))
+    except NexusError as exc:
+        _err(f"{FAIL} {exc.code}: {exc.message}")
+        return 1
+    store = TokenStore(settings.base_url, mode=args.storage or settings.token_storage, config_dir=settings.config_dir)
+    backend = store.save(stored)
+    _err(f"{OK} Token verified for {stored.fullname} ({stored.username}) and stored in the {backend}.")
+    return 0
+
+
 def cmd_skill(args: argparse.Namespace) -> int:
     from importlib import resources
 
@@ -703,6 +739,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_co.add_argument("--all", action="store_true")
     p_co.add_argument("--academic", action="store_true")
     p_co.set_defaults(func=cmd_courses)
+    p_tok = sub.add_parser("token", help="export: print the stored Nexus token for another machine; import: verify + store one")
+    p_tok.add_argument("action", choices=["export", "import"])
+    p_tok.add_argument("--format", choices=["env", "raw", "json"], default="env", help="export format (default: env lines)")
+    p_tok.add_argument("--storage", choices=["auto", "keyring", "file"], help="import: where to store it")
+    p_tok.set_defaults(func=cmd_token)
     p_sk = sub.add_parser("skill", help="Show or install the agent skill file (for CLI-driven agents like Claude Code)")
     p_sk.add_argument("action", choices=["show", "install"])
     p_sk.add_argument("--dir", help="Install directory (default ~/.claude/skills/nexus)")
