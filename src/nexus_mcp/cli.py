@@ -388,6 +388,16 @@ def cmd_serve(args: argparse.Namespace) -> int:
         serve("stdio")
         return 0
     token = args.auth_token or os.environ.get("NEXUS_HTTP_TOKEN") or None
+    oauth = bool(args.oauth or os.environ.get("NEXUS_OAUTH", "").lower() in ("1", "true", "yes"))
+    if oauth:
+        if not (args.public_url or "").startswith("https://"):
+            _err(f"{FAIL} --oauth needs --public-url https://… (the address Claude/ChatGPT will open).")
+            return 2
+        _err(f"Nexus MCP (streamable HTTP, OAuth sign-in{' + bearer' if token else ''}) on http://{args.host}:{args.port}/mcp")
+        _err(f"  Connect URL for clients: {args.public_url.rstrip('/')}/mcp")
+        serve("http", host=args.host, port=args.port, auth_token=token, public_url=args.public_url,
+              stateless=args.stateless, oauth=True)
+        return 0
     if not token and not _loopback(args.host):
         _err(f"{FAIL} Refusing to serve unauthenticated on {args.host}. Pass --auth-token (or NEXUS_HTTP_TOKEN),")
         _err("  or use `nexus-mcp expose`, which sets one up and opens a tunnel for you.")
@@ -451,7 +461,8 @@ def cmd_expose(args: argparse.Namespace) -> int:
     _err(f"  Server URL:  {url}/mcp")
     _err(f"  Header:      Authorization: Bearer {token}")
     _err("")
-    _err("Any remote MCP client (Claude.ai custom connector, ChatGPT, hosted agents) takes the same two values.")
+    _err("Header-based clients (Meta Muse, Claude Code, hosted agents) take the same two values. Claude.ai and")
+    _err("ChatGPT connectors sign in with OAuth instead: host with `serve --oauth` (docs/HOSTING.md).")
     _err(f"The token lives in {settings.config_dir / 'http-token.txt'} (rotate with --new-token). Quick-tunnel URLs")
     _err("change every run; see docs/REMOTE.md for a stable hostname. Keep this terminal open; Ctrl-C stops both.")
     _err("")
@@ -689,6 +700,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_serve.add_argument("--auth-token", help="Require 'Authorization: Bearer <token>' on HTTP (or set NEXUS_HTTP_TOKEN)")
     p_serve.add_argument("--public-url", help="Public base URL when behind a tunnel/proxy (for auth metadata)")
     p_serve.add_argument("--stateless", action="store_true", help="Stateless JSON responses (no SSE); helps some hosted clients")
+    p_serve.add_argument("--oauth", action="store_true", help="Also act as an OAuth server: clients sign in with your Nexus/Okta login (or set NEXUS_OAUTH=1). Needs --public-url")
     p_serve.set_defaults(func=cmd_serve)
     p_exp = sub.add_parser("expose", help="Serve over HTTPS for remote agents (Grok Bot, Claude.ai, ChatGPT): bearer auth + Cloudflare quick tunnel")
     p_exp.add_argument("--port", type=int, default=8765)

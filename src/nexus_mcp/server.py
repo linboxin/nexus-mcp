@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import TYPE_CHECKING, AsyncIterator
 
 from urllib.parse import urlparse
 
@@ -11,6 +11,9 @@ from mcp.server.mcpserver import MCPServer
 
 from . import __version__, runtime
 from .tools import register_all
+
+if TYPE_CHECKING:
+    from .oauth import NexusOAuthProvider
 
 INSTRUCTIONS = """\
 Nexus is Union College's Moodle. Everything here is READ-ONLY and comes from the signed-in student's own account.
@@ -39,11 +42,33 @@ async def _lifespan(_server: MCPServer) -> AsyncIterator[dict]:
         await runtime.close()
 
 
-def create_server(*, auth_token: str | None = None, public_url: str | None = None) -> MCPServer:
+def create_server(
+    *, auth_token: str | None = None, public_url: str | None = None, oauth: "NexusOAuthProvider | None" = None
+) -> MCPServer:
     """Build the server. With ``auth_token`` every HTTP request must carry
-    ``Authorization: Bearer <auth_token>`` (the SDK answers 401 otherwise)."""
+    ``Authorization: Bearer <auth_token>`` (the SDK answers 401 otherwise).
+    With ``oauth`` the server is also an OAuth authorization server (see
+    ``oauth.py``); the static token, if any, is then accepted by the provider."""
     extra: dict = {}
-    if auth_token:
+    if oauth is not None:
+        from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
+
+        from .oauth import SCOPE
+
+        base = oauth.public_url
+        extra = {
+            "auth_server_provider": oauth,
+            "auth": AuthSettings(
+                issuer_url=base,
+                resource_server_url=base + "/mcp",
+                client_registration_options=ClientRegistrationOptions(
+                    enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE]
+                ),
+                revocation_options=RevocationOptions(enabled=True),
+                validate_token_resource=False,
+            ),
+        }
+    elif auth_token:
         from mcp.server.auth.settings import AuthSettings
 
         from .http_auth import StaticTokenVerifier
@@ -51,7 +76,7 @@ def create_server(*, auth_token: str | None = None, public_url: str | None = Non
         base = (public_url or "http://127.0.0.1:8765").rstrip("/")
         extra = {
             "token_verifier": StaticTokenVerifier(auth_token),
-            "auth": AuthSettings(issuer_url=base, resource_server_url=base + "/mcp"),
+            "auth": AuthSettings(issuer_url=base, resource_server_url=base + "/mcp", validate_token_resource=False),
         }
     server = MCPServer(
         "nexus-mcp",
@@ -63,7 +88,54 @@ def create_server(*, auth_token: str | None = None, public_url: str | None = Non
         **extra,
     )
     register_all(server)
+    if oauth is not None:
+        from .oauth import CONNECT_PATH, connect_routes
+
+        server.custom_route(CONNECT_PATH, methods=["GET", "POST"])(connect_routes(oauth))
     return server
+
+
+def build_oauth_provider(public_url: str, *, static_tokens: list[str] | None = None) -> "NexusOAuthProvider":
+    """OAuth provider for ``serve --oauth``: owner = whoever the stored Nexus token belongs to."""
+    import asyncio
+
+    from .auth import TokenStore, resolve_token
+    from .cli import verify_token
+    from .config import Settings
+    from .errors import NexusError
+    from .moodle.nexus import Nexus
+    from .oauth import NexusOAuthProvider
+
+    settings = Settings.from_env()
+
+    async def identify(token: str):
+        return await verify_token(settings, token)
+
+    async def on_new_token(stored) -> None:
+        if not settings.token:  # an explicit NEXUS_TOKEN would win on restart anyway
+            TokenStore(settings.base_url, mode=settings.token_storage, config_dir=settings.config_dir).save(stored)
+        await runtime.close()
+        runtime.set_nexus(Nexus.from_settings(settings, stored.token))
+
+    provider = NexusOAuthProvider(
+        public_url=public_url,
+        site_url=settings.base_url,
+        service=settings.service,
+        state_dir=settings.config_dir,
+        identify=identify,
+        on_new_token=on_new_token,
+        static_tokens=static_tokens,
+        url_scheme=settings.url_scheme,
+    )
+    if provider.owner_user_id is None:
+        try:
+            token, _ = resolve_token(settings)
+            owner = asyncio.run(verify_token(settings, token))
+        except NexusError:
+            owner = None
+        if owner is not None and owner.user_id is not None:
+            provider.set_owner(owner.user_id)
+    return provider
 
 
 def transport_security(public_url: str | None, host: str, port: int):
@@ -95,6 +167,7 @@ def serve(
     auth_token: str | None = None,
     public_url: str | None = None,
     stateless: bool = False,
+    oauth: bool = False,
 ) -> None:
     """Run the server. ``stdio`` for local clients; ``http`` = streamable HTTP at ``/mcp``.
 
@@ -104,7 +177,12 @@ def serve(
     some hosted clients and tunnels handle better.
     """
     if transport == "http":
-        server = create_server(auth_token=auth_token, public_url=public_url or f"http://{host}:{port}")
+        provider = None
+        if oauth:
+            if not public_url:
+                raise ValueError("--oauth needs --public-url (the https:// address clients use)")
+            provider = build_oauth_provider(public_url, static_tokens=[auth_token] if auth_token else None)
+        server = create_server(auth_token=auth_token, public_url=public_url or f"http://{host}:{port}", oauth=provider)
         server.run(
             transport="streamable-http",
             host=host,

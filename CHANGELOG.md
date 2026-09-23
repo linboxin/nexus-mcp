@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0 (unreleased)
+
+- OAuth sign-in for hosted servers: `serve --transport http --oauth --public-url https://…` makes the server its own OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh tokens, revocation), so Claude.ai, the Claude mobile apps and ChatGPT connect with a **Connect** button. The login step is Union Okta via Moodle's mobile launch flow; only the server's owner (the student whose token it holds) can connect, and a reconnect refreshes an expired Nexus token. Static bearer keys (`NEXUS_HTTP_TOKEN`) keep working alongside for Muse, Grok Bot and Claude Code.
+- docs/HOSTING.md: free always-on VM + Caddy + systemd recipe, and per-app connection steps (Claude, ChatGPT, Meta Muse, Grok Bot, Claude Code).
+
 ## 0.2.0 (unreleased on PyPI; on `main`)
 
 - Agent CLI: every MCP tool is a shell command with JSON output (`call <tool> key=value`, plus `briefing`, `due`, `overdue`, `next`, `grades`, `events`, `search`, `updates`, `courses`, `tools`).
