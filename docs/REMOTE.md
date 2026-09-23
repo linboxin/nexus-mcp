@@ -24,8 +24,8 @@ Header:      Authorization: Bearer nxs_…
 **Grok Bot:** Settings → Plugins → add a custom MCP connector → paste both.
 The bot's tools are the same 19 read-only tools local clients get.
 
-**Claude.ai / ChatGPT custom connectors:** same URL; put the header in the
-connector's auth field. Keep the terminal open; Ctrl-C stops server and tunnel.
+**Claude.ai / ChatGPT custom connectors** have no header field; they sign in
+with OAuth. Run the server with `--oauth` (see [HOSTING.md](HOSTING.md)). Keep the terminal open; Ctrl-C stops server and tunnel.
 
 ## What is protected, and what is not
 
@@ -41,10 +41,9 @@ connector's auth field. Keep the terminal open; Ctrl-C stops server and tunnel.
   you own (`cloudflared tunnel create nexus`, `cloudflared tunnel route dns …`),
   then run `nexus-mcp serve --transport http --auth-token … --public-url https://nexus.yourdomain.com`
   behind it. Tailscale Funnel or ngrok work the same way.
-- Your machine has to be awake for remote agents to reach it. That is the
-  trade-off for not hosting Union credentials on a server; a hosted deployment
-  would need per-user OAuth and a real trust story, and is deliberately out of
-  scope.
+- Your machine has to be awake for remote agents to reach it. To run it 24/7
+  with an OAuth **Connect** button (Claude.ai, Claude mobile, ChatGPT) instead
+  of a pasted key, host it on a small VM: [HOSTING.md](HOSTING.md).
 
 ## Troubleshooting
 
