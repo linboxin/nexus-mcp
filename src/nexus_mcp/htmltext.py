@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from html.parser import HTMLParser
 
@@ -45,21 +46,38 @@ class _TextExtractor(HTMLParser):
             self.parts.append(data)
 
 
-def html_to_text(html: str | None, *, max_len: int | None = None) -> str:
-    if not html:
+def clean_name(name: str | None) -> str:
+    """Moodle returns some names HTML-escaped ("Software &amp; Hardware"); decode them."""
+    return html.unescape(name or "").strip()
+
+
+def clip(text: str | None, limit: int, *, hint: str | None = None) -> str | None:
+    """Shorten ``text`` to ``limit`` characters, saying so (and where the rest is) instead of a bare "…"."""
+    if not text:
+        return text or None
+    if len(text) <= limit:
+        return text
+    cut = text[:limit].rstrip()
+    more = f"[… {len(text) - len(cut):,} more characters"
+    return f"{cut} {more}{'; ' + hint if hint else ''}]"
+
+
+def html_to_text(html_text: str | None, *, max_len: int | None = None, hint: str | None = None) -> str:
+    """Readable text from Moodle HTML. ``max_len`` clips with an explicit marker (see ``clip``)."""
+    if not html_text:
         return ""
     parser = _TextExtractor()
     try:
-        parser.feed(html)
+        parser.feed(html_text)
         parser.close()
     except Exception:  # pragma: no cover - HTMLParser is lenient; belt and braces
-        text = re.sub(r"<[^>]+>", " ", html)
+        text = re.sub(r"<[^>]+>", " ", html_text)
     else:
         text = "".join(parser.parts)
     text = text.replace("\xa0", " ")
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
-    if max_len is not None and len(text) > max_len:
-        text = text[: max_len - 1].rstrip() + "…"
+    if max_len is not None:
+        text = clip(text, max_len, hint=hint) or ""
     return text

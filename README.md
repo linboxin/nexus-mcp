@@ -98,6 +98,8 @@ Copy `.env.example` to `.env` if you need to change anything. Defaults target `n
 - Third-party activities (Turnitin, H5P, LTI) appear as modules without readable content.
 - Non-academic enrolments (trainings, campus resources) never end, so they count as "in progress"; use `academic_only` to hide them.
 
+Linked Google Docs/Slides (Union-only sharing) can be read after a one-time `nexus-mcp google login`: [docs/GOOGLE.md](docs/GOOGLE.md).
+
 More: [docs/API_FEASIBILITY.md](docs/API_FEASIBILITY.md) (what Nexus exposes and why) · [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) · [CHANGELOG.md](CHANGELOG.md).
 
 <!-- MCP registry ownership marker -->

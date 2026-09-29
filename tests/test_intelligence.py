@@ -37,7 +37,7 @@ async def test_daily_briefing(world, nexus):
     assert "🔴 TODAY\nCSC-385 — Lab 3 — due 11:59 PM — not started" in text
     assert "🟡 TOMORROW\nWeb — Project Proposal — due 6:00 PM — draft saved, not submitted" in text
     assert "⚠️ OVERDUE\nCSC-385 — Lab 2 — Sep 9, 12:00 PM — OVERDUE, not submitted" in text
-    assert "📢 NEW\nWeb Programming — announcement: “Proposal template posted”" in text
+    assert "📢 NEW\nWEB — announcement: “Proposal template posted”" in text
     assert "Recommended priority:\n1. CSC-385 Lab 2 — Overdue" in text
     assert [a["id"] for a in data["today"]] == [1]
     assert [a["id"] for a in data["tomorrow"]] == [2]
@@ -66,8 +66,8 @@ async def test_what_should_i_do_next(world, nexus):
 
 async def test_weekly_briefing_groups_by_course(world, nexus):
     data = await intelligence.weekly_briefing(nexus)
-    assert set(data["by_course"]) == {CSC, WEB}
-    assert data["text"].index("⚠️ OVERDUE") < data["text"].index(CSC)
+    assert set(data["by_course"]) == {"CSC-385", "WEB"}  # one short label per course
+    assert data["text"].index("⚠️ OVERDUE") < data["text"].index("\nCSC-385\n")
     assert "- Lab 3 — Sep 11, 11:59 PM (not started)" in data["text"]
     assert "- Quiz 1 closes (quiz closes) — Sep 12, 6:00 PM" in data["text"]
 

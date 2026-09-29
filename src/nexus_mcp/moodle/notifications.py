@@ -7,7 +7,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ..errors import NexusError
-from ..htmltext import html_to_text
+from ..google import parse_google_link
+from ..htmltext import clean_name, html_to_text
 from ..models.announcement import Announcement, CourseUpdate, Notification
 from ..timeutil import unix
 from .common import file_ref
@@ -24,14 +25,16 @@ UPDATE_LABELS = {
     "contentfiles": "files added or changed",
     "attachments": "files added or changed",
     "completion": "completion status changed",
-    "gradeitems": "grade updated",
+    "gradeitems": None,  # the grade item's setup, not your grade
     "outcomes": "outcomes updated",
     "comments": "new comments",
     "ratings": "ratings changed",
     "discussions": "new discussion",
     "posts": "new posts",
-    "submissions": "submission changed",
-    "usersubmissions": "submission changed",
+    # Your own submission record. Moodle creates/touches it when you merely open the
+    # assignment, so it reads like news when nothing happened; submission status tools cover it.
+    "submissions": None,
+    "usersubmissions": None,
     "userfeedback": "new feedback",
     "grades": "grade updated",
     "attempts": "attempt recorded",
@@ -42,6 +45,90 @@ UPDATE_LABELS = {
     "usernotes": "notes changed",
     "tracking": "tracking changed",
 }
+
+
+def observe_page_text(nx: "Nexus", course_id: int, sections: list[dict[str, Any]]) -> None:
+    """Fingerprint the course page's own text: section summaries and text boxes (labels)."""
+    for s in sections:
+        text = html_to_text(s.get("summary"))
+        if text:
+            nx.watch.observe(f"course:{course_id}:section:{s.get('id')}", text, now=nx.now_ts())
+        for m in s.get("modules", []) or []:
+            if m.get("modname") == "label":
+                label_text = html_to_text(m.get("description"))
+                if label_text:
+                    nx.watch.observe(f"course:{course_id}:label:{m.get('id')}", label_text, now=nx.now_ts())
+
+
+async def check_google_files(nx: "Nexus", course_id: int, sections: list[dict[str, Any]]) -> None:
+    """Record edits to Google Docs/Slides/Sheets the course links to.
+
+    Cheap check first (Drive ``modifiedTime``); the text is only re-read when that moved,
+    and its diff goes into the same watch as page text (key ``course:<id>:gdoc:<cmid>``).
+    Runs at most once per course every ``materials`` TTL.
+    """
+    links = []
+    for s in sections:
+        for m in s.get("modules", []) or []:
+            if m.get("modname") != "url":
+                continue
+            ext = next((c for c in m.get("contents", []) or [] if c.get("type") == "url"), {})
+            link = parse_google_link(ext.get("fileurl"))
+            if link is not None and link.readable and link.kind != "folder":
+                links.append((int(m["id"]), link))
+    if not links:
+        return
+
+    async def fetch() -> bool:
+        now = nx.now_ts()
+        for cmid, link in links:
+            meta = await nx.google.metadata(link)
+            moved = nx.watch.observe(f"gmtime:{link.file_id}", str(meta.get("modifiedTime")), now=now)
+            key = f"course:{course_id}:gdoc:{cmid}"
+            if moved is not None or nx.watch.last_seen(key) is None:
+                doc = await nx.google.read(link)
+                if doc.get("text"):
+                    nx.watch.observe(key, doc["text"], now=now)
+        return True
+
+    await nx.cache.get_or_fetch(("google-check", int(course_id)), max(60, nx.ttl.materials), fetch)
+
+
+def page_text_changes(nx: "Nexus", course: Any, sections: list[dict[str, Any]], since_ts: int) -> list[CourseUpdate]:
+    """Edits to course-page text noticed since ``since_ts`` (Moodle itself never reports these)."""
+    observe_page_text(nx, course.id, sections)
+    names = {str(s.get("id")): clean_name(s.get("name")) or "course page" for s in sections}
+    labels = {
+        str(m.get("id")): (clean_name(s.get("name")) or "course page")
+        for s in sections
+        for m in s.get("modules", []) or []
+        if m.get("modname") == "label"
+    }
+    links = {str(m.get("id")): clean_name(m.get("name")) for s in sections for m in s.get("modules", []) or []}
+    out = []
+    for key, change in nx.watch.changes_since(f"course:{course.id}:", since_ts):
+        _, _, kind, ident = key.split(":", 3)
+        if kind == "gdoc":
+            module, mtype, what = links.get(ident) or "Linked Google file", "google_file", "Google file edited"
+        else:
+            where = names.get(ident) if kind == "section" else labels.get(ident)
+            module, mtype, what = f"Course page text ({where or 'course page'})", "page_text", "text edited"
+        out.append(
+            CourseUpdate(
+                course_id=course.id,
+                course=course.name,
+                cmid=int(ident) if kind in ("label", "gdoc") else 0,
+                module=module,
+                module_type=mtype,
+                changes=[what],
+                url=f"{nx.site_url}/course/view.php?id={course.id}",
+                updated=nx.when(int(change["noticed"])),
+                added=change.get("added", []),
+                removed=change.get("removed", []),
+                note="Nexus doesn't timestamp page-text edits; this is when the change was first noticed.",
+            )
+        )
+    return out
 
 
 class NotificationService:
@@ -84,7 +171,7 @@ class NotificationService:
             subject=html_to_text(d.get("name") or d.get("subject")) or "",
             author=d.get("userfullname") or None,
             posted=nx.when(d.get("created") or d.get("timemodified")),
-            message=html_to_text(d.get("message"), max_len=3000),
+            message=html_to_text(d.get("message")),
             url=f"{nx.site_url}/mod/forum/discuss.php?d={d.get('discussion')}",
             attachments=[file_ref(nx, f) for f in (d.get("attachments") or [])],
             pinned=bool(d.get("pinned")),
@@ -147,7 +234,7 @@ class NotificationService:
                 Notification(
                     id=int(n.get("id") or 0),
                     subject=html_to_text(n.get("subject") or n.get("shortenedsubject")) or "",
-                    message=html_to_text(n.get("smallmessage") or n.get("fullmessage") or n.get("text"), max_len=1000),
+                    message=html_to_text(n.get("fullmessage") or n.get("smallmessage") or n.get("text")),
                     url=n.get("contexturl") or None,
                     created=nx.when(created),
                     read=bool(n.get("read")),
@@ -180,22 +267,30 @@ class NotificationService:
                     warnings.append(f"{course.name}: {exc.message}")
                     return
                 instances = (payload or {}).get("instances", []) or []
-                if not instances:
-                    return
                 modules: dict[int, dict[str, Any]] = {}
                 try:
-                    for s in await nx.courses.contents(course.id):
-                        for m in s.get("modules", []) or []:
-                            modules[int(m["id"])] = m
+                    sections = await nx.courses.contents(course.id)
                 except NexusError:
-                    pass
+                    sections = []
+                for s in sections:
+                    for m in s.get("modules", []) or []:
+                        modules[int(m["id"])] = m
+                if nx.google.connected:
+                    try:
+                        await check_google_files(nx, course.id, sections)
+                    except NexusError as exc:
+                        warnings.append(f"{course.name} Google files: {exc.message}")
+                updates.extend(page_text_changes(nx, course, sections, since_ts))
                 for inst in instances:
                     cmid = int(inst.get("id") or 0)
                     changes = []
                     latest = 0
                     for u in inst.get("updates", []) or []:
                         name = str(u.get("name") or "")
-                        changes.append(UPDATE_LABELS.get(name, name.replace("_", " ")))
+                        label = UPDATE_LABELS.get(name, name.replace("_", " "))
+                        if label is None:
+                            continue
+                        changes.append(label)
                         latest = max(latest, int(u.get("timeupdated") or 0))
                     if not changes:
                         continue
@@ -205,7 +300,7 @@ class NotificationService:
                             course_id=course.id,
                             course=course.name,
                             cmid=cmid,
-                            module=mod.get("name"),
+                            module=clean_name(mod.get("name")) or None,
                             module_type=mod.get("modname"),
                             changes=sorted(set(changes)),
                             url=mod.get("url"),

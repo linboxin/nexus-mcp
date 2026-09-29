@@ -14,7 +14,7 @@ from .errors import NexusAuthError, NexusError
 from .models.assignment import Assignment
 from .models.event import CalendarEvent
 from .moodle.nexus import Nexus
-from .timeutil import end_of_day, unix
+from .timeutil import end_of_day, start_of_day, unix
 
 T = TypeVar("T")
 
@@ -35,6 +35,17 @@ def dedupe_warnings(warnings: list[str]) -> list[str]:
         seen.add(key)
         out.append(w)
     return out
+
+
+async def _course_labels(nx: Nexus) -> dict[int, str]:
+    """course id -> "CSC-240" for every enrolled course (one cached call)."""
+    try:
+        lookup = await nx.courses.lookup()
+    except NexusAuthError:
+        raise
+    except NexusError:
+        return {}
+    return {cid: short_course(c.short_name, c.name) for cid, c in lookup.items()}
 
 
 async def _safe(coro: Awaitable[T], default: T, warnings: list[str], label: str) -> T:
@@ -59,11 +70,36 @@ def _status_label(a: Assignment) -> str:
         return "draft saved, not submitted"
     if s.status == "overdue":
         return "OVERDUE, not submitted"
-    return "not started" if s.submission_required else "no submission required"
+    if s.status == "external":
+        where = a.submitted_elsewhere
+        return f"turned in elsewhere, check {where}" if where else "turned in outside Nexus"
+    return "not started"
+
+
+def short_course(short_name: str | None, name: str | None = None) -> str:
+    """"26/FA.CSC-240-01" -> "CSC-240"; falls back to whatever name there is."""
+    m = re.search(r"([A-Z]{2,4})-(\d{3})", short_name or "") or re.search(r"([A-Z]{2,4})-(\d{3})", name or "")
+    return f"{m.group(1)}-{m.group(2)}" if m else (short_name or name or "")
 
 
 def _course_label(a: Assignment) -> str:
-    return a.course_short or a.course
+    return short_course(a.course_short, a.course)
+
+
+def _event_course(e: CalendarEvent, labels: dict[int, str]) -> str:
+    return labels.get(e.course_id or 0) or short_course(None, e.course) or "Nexus"
+
+
+def _covered(e: CalendarEvent, assignments: list[Assignment]) -> bool:
+    """True for the calendar's "X is due" event of an assignment already listed.
+
+    Action events carry the course-module id in ``instance``, calendar events the
+    assignment id, so match either; otherwise every assignment shows up twice.
+    """
+    if e.module != "assign":
+        return False
+    keys = {a.id for a in assignments} | {a.cmid for a in assignments}
+    return e.instance in keys or (e.cmid is not None and e.cmid in keys)
 
 
 def _event_label(e: CalendarEvent) -> str:
@@ -117,22 +153,24 @@ def prioritize(
             level, why = "MEDIUM", f"Due {a.due.relative if a.due else 'soon'}"
         else:
             level, why = "LOW", f"Due {a.due.short if a.due else 'later'} ({a.due.relative if a.due else ''})".replace(" ()", "")
-        if state == "draft":
+        if state == "external":
+            where = a.submitted_elsewhere or "wherever the instructions say"
+            why += f"; handed in outside Nexus, so check {where} that it's turned in"
+        elif state == "draft":
             why += "; a draft is saved but not submitted"
         elif state == "not_started":
             why += "; not started"
         elif state == "unknown":
             why += "; submission status could not be checked"
         if a.points:
-            why += f"; worth {a.points:g} points"
+            why += f"; worth {a.points:g} point{'' if a.points == 1 else 's'}"
         add(kind="assignment", assignment_id=a.id, title=a.name, course=a.course, course_short=a.course_short,
             due=a.due.model_dump() if a.due else None, status=state,
             status_detail=a.status.detail if a.status else a.status_note, priority=level, reason=why + ".", url=a.url,
             _sort=(LEVEL_RANK[level], a.due.unix if a.due else 2**40))
 
-    assignment_instances = {a.id for a in upcoming} | overdue_ids
     for e in events:
-        if e.module == "assign" and (e.instance in assignment_instances):
+        if _covered(e, upcoming + overdue):
             continue
         if not e.start:
             continue
@@ -209,8 +247,11 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
     warnings.extend(w)
     overdue, w = await _safe(nx.assignments.overdue(), ([], []), warnings, "overdue assignments")
     warnings.extend(w)
-    events, w = await _safe(nx.calendar.events(days=2), ([], []), warnings, "calendar")
+    events, w = await _safe(
+        nx.calendar.events(days=2, since_ts=unix(start_of_day(now))), ([], []), warnings, "calendar"
+    )
     warnings.extend(w)
+    labels = await _course_labels(nx)
     announcements, w = await _safe(nx.notifications.announcements(days=2), ([], []), warnings, "announcements")
     warnings.extend(w)
     updates = await _safe(nx.notifications.course_updates(now - timedelta(hours=24)), None, warnings, "course updates")
@@ -218,8 +259,7 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
     today = [a for a in upcoming if a.due and a.due.unix <= today_end]
     tomorrow = [a for a in upcoming if a.due and today_end < a.due.unix <= tomorrow_end]
     soon = [a for a in upcoming if a.due and a.due.unix > tomorrow_end]
-    assignment_ids = {a.id for a in upcoming} | {a.id for a in overdue}
-    other_events = [e for e in events if not (e.module == "assign" and e.instance in assignment_ids)]
+    other_events = [e for e in events if not _covered(e, upcoming + overdue)]
     events_today = [e for e in other_events if e.start and e.start.unix <= today_end]
     events_tomorrow = [e for e in other_events if e.start and today_end < e.start.unix <= tomorrow_end]
     module_updates = list((updates or {}).get("module_updates", []))
@@ -229,13 +269,18 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
     lines = [f"{_greeting(now)} It is {now:%A}, {now:%B} {now.day}.", ""]
     lines.append("🔴 TODAY")
     lines.extend([_assignment_line(a) for a in today] or ["Nothing due today."])
+    now_ts = unix(now)
     if events_today:
-        lines.extend(f"{e.course or 'Nexus'} — {_event_label(e)} — {e.start.short.split(', ', 1)[-1] if e.start else ''}" for e in events_today)
+        lines.extend(
+            f"{_event_course(e, labels)} — {_event_label(e)} — {e.start.short.split(', ', 1)[-1] if e.start else ''}"
+            + (" (earlier today)" if e.start and e.start.unix < now_ts else "")
+            for e in events_today
+        )
     lines.append("")
     lines.append("🟡 TOMORROW")
     lines.extend([_assignment_line(a) for a in tomorrow] or ["Nothing due tomorrow."])
     if events_tomorrow:
-        lines.extend(f"{e.course or 'Nexus'} — {_event_label(e)}" for e in events_tomorrow)
+        lines.extend(f"{_event_course(e, labels)} — {_event_label(e)}" for e in events_tomorrow)
     lines.append("")
     if soon:
         lines.append("🟢 COMING UP (next 7 days)")
@@ -243,10 +288,13 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
         lines.append("")
     lines.append("📢 NEW")
     new_lines = [
-        f"{a.course} — announcement: “{a.subject}” ({a.author or 'staff'}, {a.posted.relative if a.posted else ''})"
+        f"{labels.get(a.course_id) or a.course} — announcement: “{a.subject}” ({a.author or 'staff'}, {a.posted.relative if a.posted else ''})"
         for a in announcements[:6]
     ]
-    new_lines += [f"{u['course']} — {u.get('module') or 'module ' + str(u['cmid'])}: {', '.join(u['changes'])}" for u in module_updates[:8]]
+    new_lines += [
+        f"{labels.get(u['course_id']) or u['course']} — {u.get('module') or 'module ' + str(u['cmid'])}: {', '.join(u['changes'])}"
+        for u in module_updates[:8]
+    ]
     lines.extend(new_lines or ["No new announcements or course changes in the last day."])
     lines.append("")
     lines.append("⚠️ OVERDUE")
@@ -255,7 +303,7 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
     lines.append("Recommended priority:")
     top = priorities[:4]
     lines.extend(
-        f"{i}. {item.get('course_short') or item.get('course') or ''} {item['title']} — {item['reason']}".replace("  ", " ")
+        f"{i}. {short_course(item.get('course_short'), item.get('course'))} {item['title']} — {item['reason']}".replace("  ", " ")
         for i, item in enumerate(top, start=1)
     ) if top else lines.append("You're clear. Nothing urgent is pending.")
     all_warnings = dedupe_warnings(warnings + update_warnings)
@@ -289,17 +337,17 @@ async def weekly_briefing(nx: Nexus, days: int = 7) -> dict[str, Any]:
     warnings.extend(w)
     events, w = await _safe(nx.calendar.events(days=days), ([], []), warnings, "calendar")
     warnings.extend(w)
-    assignment_ids = {a.id for a in upcoming}
-    other_events = [e for e in events if not (e.module == "assign" and e.instance in assignment_ids)]
+    other_events = [e for e in events if not _covered(e, upcoming + overdue)]
 
     by_course: dict[str, list[tuple[int, str, dict[str, Any]]]] = {}
+    labels = await _course_labels(nx)
     for a in upcoming:
-        key = a.course
+        key = labels.get(a.course_id) or _course_label(a)
         by_course.setdefault(key, []).append(
             (a.due.unix if a.due else 0, f"- {a.name} — {a.due.short if a.due else 'no date'} ({_status_label(a)})", a.model_dump())
         )
     for e in other_events:
-        key = e.course or "Nexus (site/personal events)"
+        key = labels.get(e.course_id or 0) or e.course or "Nexus (site/personal events)"
         by_course.setdefault(key, []).append(
             (e.start.unix if e.start else 0, f"- {_event_label(e)} — {e.start.short if e.start else ''}", e.model_dump())
         )
@@ -367,12 +415,11 @@ async def workload_analysis(nx: Nexus, days: int = 7) -> dict[str, Any]:
     warnings.extend(w)
     events, w = await _safe(nx.calendar.events(days=days), ([], []), warnings, "calendar")
     warnings.extend(w)
-    assignment_ids = {a.id for a in upcoming}
     assessments = [
         e for e in events
-        if e.module in ASSESSMENT_MODULES and e.type in DEADLINE_EVENT_TYPES and not (e.module == "assign" and e.instance in assignment_ids)
+        if e.module in ASSESSMENT_MODULES and e.type in DEADLINE_EVENT_TYPES and not _covered(e, upcoming + overdue)
     ]
-    other_events = [e for e in events if e not in assessments and not (e.module == "assign" and e.instance in assignment_ids)]
+    other_events = [e for e in events if e not in assessments and not _covered(e, upcoming + overdue)]
 
     by_course: dict[str, int] = {}
     by_day: dict[str, list[str]] = {}

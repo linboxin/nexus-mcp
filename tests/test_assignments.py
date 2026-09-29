@@ -213,4 +213,4 @@ def test_summarize_warnings_collapses_duplicates():
     raw = [{"item": "module", "itemid": i, "warningcode": "1", "message": "No access rights in module context"} for i in range(21)]
     raw.append({"item": "course", "itemid": 5, "warningcode": "2", "message": "Course is hidden"})
     out = summarize_warnings(raw)
-    assert out == ["21 assignments skipped by Nexus: No access rights in module context (hidden or inaccessible modules)", "Course is hidden"]
+    assert out == ["21 assignments are hidden on Nexus (not released to students yet); Nexus doesn't show their names", "Course is hidden"]

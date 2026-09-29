@@ -14,7 +14,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from ..errors import NexusError
-from ..htmltext import html_to_text
+from ..htmltext import clean_name, html_to_text
 from ..models.event import CalendarEvent, EventAction
 
 if TYPE_CHECKING:
@@ -42,7 +42,7 @@ class CalendarService:
             course=names.get(course_id) if course_id else None,
             start=nx.when(start),
             end=nx.when(start + duration) if duration else None,
-            description=html_to_text(e.get("description"), max_len=600) or None,
+            description=html_to_text(e.get("description"), max_len=2000, hint="open the event url for the rest") or None,
             url=f"{nx.site_url}/calendar/view.php?view=day&time={start}" if start else None,
             type=e.get("eventtype") or "unknown",
             module=e.get("modulename") or None,
@@ -65,7 +65,7 @@ class CalendarService:
             course=(course.get("fullname") or names.get(course_id)) if course_id else None,
             start=nx.when(start),
             end=nx.when(start + duration) if duration else None,
-            description=html_to_text(e.get("description"), max_len=600) or None,
+            description=html_to_text(e.get("description"), max_len=2000, hint="open the event url for the rest") or None,
             url=e.get("url") or None,
             type=e.get("eventtype") or "unknown",
             module=e.get("modulename") or None,
@@ -82,11 +82,16 @@ class CalendarService:
             source="action",
         )
 
-    async def events(self, days: int = 14, *, course_id: int | None = None) -> tuple[list[CalendarEvent], list[str]]:
+    async def events(
+        self, days: int = 14, *, course_id: int | None = None, since_ts: int | None = None
+    ) -> tuple[list[CalendarEvent], list[str]]:
+        """Events from ``since_ts`` (default: now) to ``days`` from now. Briefings pass the
+        start of today so this morning's lecture or exam still shows up."""
         nx = self.nx
         days = max(1, int(days))
         now_ts = nx.now_ts()
         end_ts = now_ts + days * 86400
+        start_ts = int(since_ts) if since_ts is not None else now_ts
         warnings: list[str] = []
         lookup = await nx.courses.lookup()
         names = {cid: c.name for cid, c in lookup.items()}
@@ -94,7 +99,7 @@ class CalendarService:
             course_ids = [int(course_id)]
         else:
             course_ids = await nx.courses.current_course_ids()
-        cache_key = ("calendar", tuple(course_ids), now_ts // 300, days)
+        cache_key = ("calendar", tuple(course_ids), now_ts // 300, days, start_ts // 300)
 
         async def fetch() -> dict[str, Any]:
             merged: dict[int, CalendarEvent] = {}
@@ -103,7 +108,7 @@ class CalendarService:
                     payload = await nx.client.call(
                         "core_calendar_get_calendar_events",
                         events={"courseids": course_ids, "groupids": [], "categoryids": []},
-                        options={"userevents": 1, "siteevents": 1, "timestart": now_ts, "timeend": end_ts, "ignorehidden": 1},
+                        options={"userevents": 1, "siteevents": 1, "timestart": start_ts, "timeend": end_ts, "ignorehidden": 1},
                     )
                     for e in (payload or {}).get("events", []):
                         if course_id is not None and int(e.get("courseid") or 0) not in (int(course_id), 0, 1):
@@ -118,7 +123,7 @@ class CalendarService:
                     after_id = 0
                     for _page in range(ACTION_EVENT_PAGES):  # Moodle caps limitnum at 50; page with aftereventid
                         params = {
-                            "timesortfrom": now_ts,
+                            "timesortfrom": start_ts,
                             "timesortto": end_ts,
                             "limitnum": ACTION_EVENT_PAGE_SIZE,
                             "limittononsuspendedevents": 1,
@@ -145,7 +150,7 @@ class CalendarService:
                 "core_calendar_get_action_events_by_timesort"
             ):
                 nx.require("core_calendar_get_calendar_events", feature="calendar events")
-            events = [e for e in merged.values() if e.start and now_ts - 60 <= e.start.unix <= end_ts]
+            events = [e for e in merged.values() if e.start and start_ts - 60 <= e.start.unix <= end_ts]
             events.sort(key=lambda e: (e.start.unix if e.start else 0, e.name))
             return {"events": events, "warnings": list(warnings)}
 

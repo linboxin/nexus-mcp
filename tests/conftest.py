@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import tempfile
 import urllib.parse
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -113,6 +115,7 @@ def fake() -> Any:
 
 def make_settings(**overrides: Any) -> Settings:
     cache = overrides.pop("cache", CacheTTLs(courses=900, course_info=900, assignments=120, grades=0, submission=0, calendar=120, announcements=120, materials=600))
+    overrides.setdefault("config_dir", Path(tempfile.mkdtemp(prefix="nexus-test-")))  # never the real one
     return Settings(base_url=SITE, token=TOKEN, cache=cache, **overrides)
 
 

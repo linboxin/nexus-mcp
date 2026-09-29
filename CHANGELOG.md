@@ -2,6 +2,16 @@
 
 ## 0.3.0 (unreleased)
 
+Data-quality fixes (from a semester of real use):
+
+- **Course page news box is watched.** Section summaries and text boxes are fingerprinted (`watch-state.json`); `course_updates` and the daily briefing report edits with the added/removed lines, and `get_course` shows each section's latest edit. Returned in full instead of cut at 400 characters.
+- **No more silent truncation.** Descriptions, instructions, feedback, announcements and notifications come back whole; list views that still shorten say how much was left out and which tool has the rest.
+- **Linked Google Docs/Slides/Sheets/folders** (optional, `nexus-mcp google login`, docs/GOOGLE.md): `get_material` reads them through the student's own read-only Google sign-in, and `course_updates` flags edits. Without it, the link comes back with instructions instead of a bare URL.
+- **Assignment status fixed.** No-Nexus-submission work (cs-gitlab, GitHub, Gradescope…) is `external` ("turned in elsewhere, check cs-gitlab"), not "not started". Open/closed now follows the real open, due and cut-off dates and the lock flag; Moodle's `cansubmit` (only "a draft can be sent") no longer marks open assignments as closed.
+- **Cleaner briefings.** No fake "submission changed"/grade-item updates; an assignment and its calendar "is due" event no longer both appear (action events carry the cmid); consistent short course labels ("CSC-240"); events from earlier today are included; hidden assignments are explained in one line.
+- Course structure: Moodle 4.5 subsections are nested under their week; `&amp;` and other entities in names are decoded; trainings and other non-academic enrolments are left out of briefings, due dates and updates (still listed by `list_courses`).
+- `get_material` accepts a numeric id from the CLI.
+
 - OAuth sign-in for hosted servers: `serve --transport http --oauth --public-url https://…` makes the server its own OAuth 2.1 authorization server (dynamic client registration, PKCE, rotating refresh tokens, revocation), so Claude.ai, the Claude mobile apps and ChatGPT connect with a **Connect** button. The login step is Union Okta via Moodle's mobile launch flow; only the server's owner (the student whose token it holds) can connect, and a reconnect refreshes an expired Nexus token. Static bearer keys (`NEXUS_HTTP_TOKEN`) keep working alongside for Muse, Grok Bot and Claude Code.
 - docs/HOSTING.md: free always-on VM + Caddy + systemd recipe, and per-app connection steps (Claude, ChatGPT, Meta Muse, Grok Bot, Claude Code).
 

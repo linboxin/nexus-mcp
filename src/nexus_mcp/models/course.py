@@ -38,12 +38,15 @@ class CourseModule(BaseModel):
     dates: list[dict[str, Any]] = Field(default_factory=list)
     completion: str | None = None
     availability: str | None = None
+    subsection: "CourseSection | None" = None  # Moodle 4.5+ subsection: its contents live here
 
 
 class CourseSection(BaseModel):
     id: int
     name: str
-    summary: str | None = None
+    summary: str | None = None  # full text; instructors often keep a running "News" list here
+    summary_last_edited: When | None = None  # when nexus-mcp first noticed the latest edit (Nexus has no timestamp)
+    summary_last_edit: dict[str, Any] | None = None  # {"added": [...], "removed": [...]} lines of that edit
     modules: list[CourseModule] = Field(default_factory=list)
 
 
@@ -53,3 +56,6 @@ class CourseDetail(Course):
     sections: list[CourseSection] = Field(default_factory=list)
     materials: list[CourseModule] = Field(default_factory=list)
     activities: list[CourseModule] = Field(default_factory=list)
+
+
+CourseModule.model_rebuild()
