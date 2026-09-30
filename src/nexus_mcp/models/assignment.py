@@ -6,7 +6,9 @@ from pydantic import BaseModel, Field
 
 from .common import FileRef, Freshness, When
 
-SubmissionState = Literal["not_started", "draft", "submitted", "graded", "overdue"]
+SubmissionState = Literal["not_started", "draft", "submitted", "graded", "overdue", "external"]
+# external = the assignment takes no Nexus submission (turned in on cs-gitlab, on paper, ...),
+# so Nexus cannot know whether it was handed in.
 
 
 class SubmissionStatus(BaseModel):
@@ -47,6 +49,7 @@ class Assignment(BaseModel):
     grade_type: str = "none"  # points | scale | none
     url: str
     submission_required: bool = True
+    submitted_elsewhere: str | None = None  # where to hand it in when not on Nexus, e.g. "cs-gitlab"
     submission_types: list[str] = Field(default_factory=list)
     time_limit_minutes: int | None = None
     team_submission: bool = False

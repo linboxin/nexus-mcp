@@ -604,6 +604,56 @@ def cmd_courses(args: argparse.Namespace) -> int:
     return run_tool("list_courses", {"classification": "all" if args.all else "inprogress", "academic_only": args.academic}, as_json=True)
 
 
+def cmd_google(args: argparse.Namespace) -> int:
+    """Connect the student's Google account (read-only) so linked Docs/Slides can be read."""
+    from .google import GoogleCredentials, login
+
+    settings = Settings.from_env()
+    creds = GoogleCredentials(settings.config_dir)
+    if args.action == "status":
+        data = creds.load()
+        if data:
+            _err(f"{OK} Google connected as {data.get('email') or 'unknown account'} ({creds.path}).")
+            return 0
+        _err("Google is not connected. Run `nexus-mcp google login --client-id … --client-secret …`.")
+        return 1
+    if args.action == "logout":
+        creds.clear()
+        _err(f"{OK} Google disconnected. Also remove the app at https://myaccount.google.com/permissions")
+        return 0
+    if args.action == "export":  # move the sign-in to a server, like `token export`
+        data = creds.load()
+        if not data:
+            _err(f"{FAIL} Google is not connected on this machine.")
+            return 1
+        print(json.dumps(data))
+        return 0
+    if args.action == "import":
+        raw = sys.stdin.read().strip()
+        try:
+            data = json.loads(raw)
+            assert data.get("refresh_token") and data.get("client_id")
+        except (ValueError, AssertionError):
+            _err(f"{FAIL} Pipe the output of `nexus-mcp google export` into this command.")
+            return 2
+        creds.save(data)
+        _err(f"{OK} Google sign-in stored for {data.get('email') or 'your account'} ({creds.path}).")
+        return 0
+    client_id = args.client_id or os.environ.get("NEXUS_GOOGLE_CLIENT_ID")
+    client_secret = args.client_secret or os.environ.get("NEXUS_GOOGLE_CLIENT_SECRET")
+    if not client_id or not client_secret:
+        _err(f"{FAIL} Needs a Google OAuth client (Desktop app). See docs/GOOGLE.md, then pass")
+        _err("  --client-id and --client-secret (or set NEXUS_GOOGLE_CLIENT_ID / NEXUS_GOOGLE_CLIENT_SECRET).")
+        return 2
+    try:
+        who = login(settings.config_dir, client_id, client_secret, open_browser=not args.no_browser)
+    except NexusError as exc:
+        _err(f"{FAIL} {exc.message}")
+        return 1
+    _err(f"{OK} Google connected as {who}. Linked Docs, Slides and Sheets can now be read (read-only).")
+    return 0
+
+
 def cmd_token(args: argparse.Namespace) -> int:
     """Move the Nexus token to another machine (a bot's computer, a server) without re-running SSO."""
     settings = Settings.from_env()
@@ -756,6 +806,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_tok.add_argument("--format", choices=["env", "raw", "json"], default="env", help="export format (default: env lines)")
     p_tok.add_argument("--storage", choices=["auto", "keyring", "file"], help="import: where to store it")
     p_tok.set_defaults(func=cmd_token)
+    p_g = sub.add_parser("google", help="Connect Google (read-only) so linked Docs/Slides/Sheets can be read")
+    p_g.add_argument("action", choices=["login", "status", "logout", "export", "import"])
+    p_g.add_argument("--client-id", help="Google OAuth client id (Desktop app); see docs/GOOGLE.md")
+    p_g.add_argument("--client-secret", help="Google OAuth client secret")
+    p_g.add_argument("--no-browser", action="store_true")
+    p_g.set_defaults(func=cmd_google)
     p_sk = sub.add_parser("skill", help="Show or install the agent skill file (for CLI-driven agents like Claude Code)")
     p_sk.add_argument("action", choices=["show", "install"])
     p_sk.add_argument("--dir", help="Install directory (default ~/.claude/skills/nexus)")

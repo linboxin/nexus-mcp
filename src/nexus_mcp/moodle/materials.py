@@ -7,6 +7,7 @@ import re
 from typing import TYPE_CHECKING, Any
 
 from ..errors import NexusError, NexusNotFoundError
+from ..google import GoogleLink, not_connected_note, parse_google_link
 from ..htmltext import html_to_text
 from ..models.material import Material, MaterialContent
 from .courses import ACTIVITY_MODULES, MATERIAL_MODULES
@@ -100,7 +101,7 @@ class MaterialService:
                     continue
                 cmid = int(m["id"])
                 files = [c for c in m.get("contents", []) or [] if c.get("type") == "file" and not str(c.get("filename", "")).startswith("structure")]
-                desc = html_to_text(m.get("description"), max_len=400) or None
+                desc = html_to_text(m.get("description"), max_len=1500, hint=f"get_material('{cmid}') has the rest") or None
                 base = dict(
                     cmid=cmid,
                     course_id=course_id,
@@ -247,6 +248,9 @@ class MaterialService:
             elif m.module_type == "url":
                 content, content_type = m.file_url, "url"
                 note = "External link; open it in a browser."
+                link = parse_google_link(m.file_url)
+                if link is not None and link.readable:
+                    content, content_type, truncated, note = await self._google_content(link)
             elif m.module_type == "label":
                 content, content_type = m.description, "text"
             elif m.file_url and _is_textual(m.mimetype, m.filename):
@@ -264,9 +268,24 @@ class MaterialService:
         except NexusError as exc:
             note = f"Content could not be retrieved: {exc.message}"
         if content and len(content) > MAX_TEXT_CHARS:
-            content = content[:MAX_TEXT_CHARS] + "\n…"
+            rest = len(content) - MAX_TEXT_CHARS
+            content = content[:MAX_TEXT_CHARS] + f"\n[… {rest:,} more characters not shown; open the url for the whole file]"
             truncated = True
         return MaterialContent(**m.model_dump(), content=content, content_type=content_type, truncated=truncated, note=note)
+
+    async def _google_content(self, link: GoogleLink) -> tuple[str | None, str | None, bool, str]:
+        """Text of a linked Google Doc/Slides/Sheet/folder via the student's own Google sign-in."""
+        drive = self.nx.google
+        if not drive.connected:
+            return link.url, "url", False, not_connected_note(link)
+        doc = await drive.read(link)
+        edited = f"last edited {doc['modified'][:16].replace('T', ' ')} UTC" if doc.get("modified") else None
+        who = f" by {doc['modified_by']}" if doc.get("modified_by") else ""
+        note = f"{link.label} read through your Google account" + (f"; {edited}{who}" if edited else "") + "."
+        if doc.get("text") is None:
+            return link.url, "url", False, note + " This file type has no text export; open the link."
+        ctype = "csv" if doc.get("mime_type", "").endswith("spreadsheet") else "text"
+        return doc["text"], ctype, bool(doc.get("truncated")), note
 
     async def _page_content(self, m: Material) -> tuple[str | None, str]:
         nx = self.nx

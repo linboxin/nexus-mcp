@@ -67,7 +67,7 @@ class GradeService:
             weight=raw.get("weightformatted") or None,
             range=raw.get("rangeformatted") or None,
             letter=raw.get("lettergradeformatted") or None,
-            feedback=html_to_text(raw.get("feedback"), max_len=1500) or None,
+            feedback=html_to_text(raw.get("feedback")) or None,
             graded_at=nx.when(raw.get("gradedategraded")),
             submitted_at=nx.when(raw.get("gradedatesubmitted")),
             hidden=bool(raw.get("gradeishidden")) or bool(raw.get("gradehiddenbydate")),

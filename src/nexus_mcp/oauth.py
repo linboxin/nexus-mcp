@@ -188,6 +188,14 @@ class NexusOAuthProvider:
 
         Raises ``ConnectError`` with a user-facing message on failure.
         """
+        link = (token_link or "").strip()
+        if self._state.pending.get(request_id) and "token=" not in link:
+            # an obviously wrong paste (the server key, a web URL, nothing) doesn't use up an attempt
+            hint = "That's the server key, not the Nexus link. " if link.startswith("nxs_") else ""
+            raise ConnectError(
+                hint + "Paste the link from Nexus's confirmation page: it starts with ltgopenlmsapp://token=. "
+                "Right-click (phone: long-press) \"Click here if the app does not open automatically\" and choose Copy Link."
+            )
         async with self._lock:
             now = time.time()
             self._prune(now)
@@ -202,7 +210,7 @@ class NexusOAuthProvider:
             self._save()
             passport = pending["passport"]
         try:
-            bundle = parse_token_url(token_link, site_url=self.site_url, passport=passport)
+            bundle = parse_token_url(link, site_url=self.site_url, passport=passport)
             identity = await self._identify(bundle.token)
         except NexusError as exc:
             raise ConnectError(exc.message) from exc

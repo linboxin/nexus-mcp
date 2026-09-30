@@ -30,6 +30,9 @@ class CourseUpdate(BaseModel):
     changes: list[str] = Field(default_factory=list)
     url: str | None = None
     updated: When | None = None
+    added: list[str] = Field(default_factory=list)  # for edited page text: lines that are new
+    removed: list[str] = Field(default_factory=list)
+    note: str | None = None
 
 
 class Notification(BaseModel):

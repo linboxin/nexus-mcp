@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..cache import CacheMeta
 from ..errors import NexusError, NexusNotFoundError, NexusPermissionError, NexusUnsupportedError
-from ..htmltext import html_to_text
+from ..htmltext import clean_name, html_to_text
 from ..models.assignment import Assignment, AssignmentDetail, SubmissionStatus
 from .common import as_float, file_ref
 
@@ -33,10 +33,15 @@ def summarize_warnings(raw: list[dict[str, Any]]) -> list[str]:
         counts[message] = counts.get(message, 0) + 1
     out = []
     for message, n in counts.items():
-        if n == 1:
+        if message.lower().startswith("no access rights in module context"):
+            # Assignments the teacher has hidden (not released yet). Moodle refuses to say
+            # anything about them, names included, so a clear count is all there is.
+            what = "assignment is" if n == 1 else "assignments are"
+            out.append(f"{n} {what} hidden on Nexus (not released to students yet); Nexus doesn't show their names")
+        elif n == 1:
             out.append(message)
         else:
-            out.append(f"{n} assignments skipped by Nexus: {message} (hidden or inaccessible modules)")
+            out.append(f"{n} assignments skipped by Nexus: {message}")
     return out
 
 
@@ -82,7 +87,9 @@ def normalize_submission(
         status = "graded" if graded else "submitted"
     elif graded:
         status = "graded"
-    elif past_due and required:
+    elif not required:
+        status = "external"
+    elif past_due:
         status = "overdue"
     elif sub_status in ("draft", "reopened"):
         status = "draft"
@@ -102,16 +109,23 @@ def normalize_submission(
             detail += "; cut-off date passed, Nexus no longer accepts submissions"
     elif status == "draft":
         detail = f"Draft saved, not submitted (due {rel})"
+    elif status == "external":
+        where = assignment.submitted_elsewhere
+        detail = (
+            f"Turned in outside Nexus: check {where} (Nexus can't see it)"
+            if where
+            else "Turned in outside Nexus (see the instructions); Nexus can't tell whether it was handed in"
+        )
+        if when_due:
+            detail += f"; due {rel}"
     else:
-        detail = "Not started" if required else "No online submission required for this assignment"
-        if required and when_due:
-            detail += f" (due {rel})"
+        detail = f"Not started (due {rel})" if when_due else "Not started"
 
     comments = None
     for plugin in feedback.get("plugins", []) or []:
         if plugin.get("type") == "comments":
             for field in plugin.get("editorfields", []) or []:
-                text = html_to_text(field.get("text"), max_len=2000)
+                text = html_to_text(field.get("text"))
                 if text:
                     comments = text
     attempt = grade_info.get("attemptnumber", sub.get("attemptnumber"))
@@ -135,6 +149,39 @@ def normalize_submission(
         attempt_number=int(attempt) + 1 if attempt is not None else None,
         freshness=nx.freshness(meta) if meta else None,
     )
+
+
+EXTERNAL_HOSTS = (
+    ("cs-gitlab", "cs-gitlab"), ("gitlab", "gitlab"), ("github", "GitHub"), ("gradescope", "Gradescope"),
+    ("google classroom", "Google Classroom"), ("hard copy", "class (hard copy)"),
+)
+
+
+def external_host(intro_text: str | None) -> str | None:
+    """Where a no-Nexus-submission assignment is handed in, if the instructions say."""
+    low = (intro_text or "").lower()
+    return next((label for key, label in EXTERNAL_HOSTS if key in low), None)
+
+
+def submission_open(a: Assignment, now_ts: int) -> bool | None:
+    """Can the student still hand this in on Nexus? From Moodle's own dates and lock flag.
+
+    Moodle's ``cansubmit`` only means "a draft can be sent for grading", so it is false
+    for most open assignments; ``canedit`` plus the open/cut-off dates is the real answer.
+    Late work is accepted until the cut-off date (or forever without one).
+    """
+    if not a.submission_required:
+        return None  # handed in elsewhere
+    st = a.status
+    if st is not None and st.locked:
+        return False
+    if a.cutoff and a.cutoff.unix <= now_ts:
+        return False
+    if a.opens and a.opens.unix > now_ts:
+        return False
+    if st is not None and st.can_edit is not None:
+        return bool(st.can_edit or st.can_submit)
+    return True
 
 
 class AssignmentService:
@@ -192,14 +239,18 @@ class AssignmentService:
             }
         )
         cmid = int(a.get("cmid") or 0)
+        no_nexus_submission = bool(a.get("nosubmissions"))
         return Assignment(
             id=int(a["id"]),
             cmid=cmid,
             course_id=int(a.get("course") or 0),
             course=a.get("_course_name") or "",
             course_short=a.get("_course_shortname"),
-            name=a.get("name") or "",
-            description=html_to_text(a.get("intro"), max_len=800) or None,
+            name=clean_name(a.get("name")),
+            description=html_to_text(
+                a.get("intro"), max_len=2500, hint=f"assignment_details({int(a['id'])}) has the full instructions"
+            )
+            or None,
             due=nx.when(a.get("duedate")),
             opens=nx.when(a.get("allowsubmissionsfromdate")),
             cutoff=nx.when(a.get("cutoffdate")),
@@ -207,7 +258,8 @@ class AssignmentService:
             points=points,
             grade_type=grade_type,
             url=f"{nx.site_url}/mod/assign/view.php?id={cmid}",
-            submission_required=not bool(a.get("nosubmissions")),
+            submission_required=not no_nexus_submission,
+            submitted_elsewhere=external_host(html_to_text(a.get("intro"))) if no_nexus_submission else None,
             submission_types=types,
             time_limit_minutes=int(a["timelimit"]) // 60 if a.get("timelimit") else None,
             team_submission=bool(a.get("teamsubmission")),
@@ -235,12 +287,7 @@ class AssignmentService:
                 a.original_due = a.due
                 a.due = a.status.extension_due
             a.is_overdue = a.status.status == "overdue"
-            if a.cutoff and a.cutoff.unix < now_ts:
-                a.can_still_submit = False
-            elif a.status.can_submit is not None:
-                a.can_still_submit = a.status.can_submit
-            elif a.status.status in ("submitted", "graded"):
-                a.can_still_submit = None
+            a.can_still_submit = submission_open(a, now_ts)
 
         await asyncio.gather(*(one(a) for a in assignments))
 
@@ -264,7 +311,8 @@ class AssignmentService:
     async def upcoming(
         self, days: int = 7, course_id: int | None = None, *, include_submitted: bool = True
     ) -> tuple[list[Assignment], list[str]]:
-        rows, warnings = await self.raw_assignments([int(course_id)] if course_id is not None else None)
+        course_ids = [int(course_id)] if course_id is not None else await self.nx.courses.current_course_ids()
+        rows, warnings = await self.raw_assignments(course_ids)
         now_ts = self.nx.now_ts()
         horizon = now_ts + max(1, int(days)) * 86400
         candidates = [
@@ -370,10 +418,10 @@ class AssignmentService:
         for f in data.get("attachments", {}).get("intro", []) or []:
             if f.get("fileurl") not in {r.url for r in resources}:
                 resources.append(file_ref(self.nx, f))
-        activity_instructions = html_to_text(data.get("activity"), max_len=6000) or None
+        activity_instructions = html_to_text(data.get("activity")) or None
         detail = AssignmentDetail(
             **assignment.model_dump(),
-            instructions=html_to_text(raw.get("intro"), max_len=8000) or None,
+            instructions=html_to_text(raw.get("intro")) or None,
             activity_instructions=activity_instructions,
             submission_requirements=requirements,
             grading=grading,

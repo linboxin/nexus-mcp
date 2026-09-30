@@ -11,7 +11,7 @@ def register(server: Any) -> None:
     @nexus_tool
     async def upcoming_assignments(days: int = 7, course_id: int | None = None, include_submitted: bool = True) -> dict[str, Any]:
         """Assignments due within the next `days` days, ordered by due date, each with its
-        Moodle submission status (not_started / draft / submitted / graded / overdue), points
+        Moodle submission status (not_started / draft / submitted / graded / overdue, or external = handed in outside Nexus, e.g. cs-gitlab), points
         and URL. This is the one call to make for "what's due this week?". Dates are in the
         student's timezone. Set include_submitted=false to hide finished work."""
         nx = await runtime.get_nexus()
@@ -43,7 +43,7 @@ def register(server: Any) -> None:
     @nexus_tool
     async def submission_status(assignment_id: int) -> dict[str, Any]:
         """Authoritative submission status for one assignment straight from Moodle:
-        not_started, draft, submitted, graded or overdue, with the grade/feedback when
+        not_started, draft, submitted, graded, overdue or external (handed in outside Nexus), with the grade/feedback when
         released. Check `freshness.cached` before calling the value real-time."""
         nx = await runtime.get_nexus()
         status = await nx.assignments.submission_status(assignment_id)

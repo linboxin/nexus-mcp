@@ -55,7 +55,7 @@ Any Linux box with a public IP works. Oracle Cloud's *Always Free* tier
 
    ```bash
    curl -LsSf https://astral.sh/uv/install.sh | sh
-   uv tool install git+https://github.com/linboxin/nexus-mcp
+   uv tool install --with "pypdf>=4.0" git+https://github.com/linboxin/nexus-mcp   # pypdf: read PDF lecture slides
    ```
 
 4. **Token.** Pipe it from your Mac straight into the VM's credential file

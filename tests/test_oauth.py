@@ -194,8 +194,11 @@ async def test_link_from_another_login_attempt_is_refused(provider):
 async def test_garbage_and_attempt_limit(provider):
     async with app_client(provider) as client:
         req = await start_authorize(client, await register(client))
+        r = await client.post(CONNECT_PATH, data={"req": req, "link": STATIC})  # pasted the server key
+        assert r.status_code == 400 and "server key" in r.text
+        assert provider._state.pending[req]["attempts"] == 0  # obvious wrong pastes are free
         for _ in range(MAX_ATTEMPTS):
-            r = await client.post(CONNECT_PATH, data={"req": req, "link": "hello"})
+            r = await client.post(CONNECT_PATH, data={"req": req, "link": "x://token=hello"})
             assert r.status_code == 400
         r = await connect(client, provider, req)
         assert r.status_code == 400 and "Too many attempts" in r.text

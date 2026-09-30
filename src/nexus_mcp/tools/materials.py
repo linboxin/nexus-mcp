@@ -20,7 +20,7 @@ def register(server: Any) -> None:
 
     @server.tool(name="get_material", annotations=READ_ONLY)
     @nexus_tool
-    async def get_material(material_id: str) -> dict[str, Any]:
+    async def get_material(material_id: str | int) -> dict[str, Any]:
         """Metadata for one material plus its content when it is text-bearing (Moodle
         pages, books, text/HTML files, external links, and PDFs when the optional pdf
         extra is installed). material_id is the id from search_course_materials or a

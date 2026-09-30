@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import TYPE_CHECKING, Any, Iterable
 
 from ..errors import NexusNotFoundError
-from ..htmltext import html_to_text
+from ..htmltext import clean_name, html_to_text
 from ..models.course import Course, CourseDetail, CourseModule, CourseSection
 from .common import file_ref
+from .notifications import observe_page_text
 
 if TYPE_CHECKING:
     from .nexus import Nexus
@@ -49,6 +51,14 @@ def classify_course(raw: dict[str, Any], now_ts: int) -> str:
     if start and start > now_ts:
         return "future"
     return "inprogress"
+
+
+def _subsection_id(module: dict[str, Any]) -> int:
+    """Section id a ``subsection`` module points at (``customdata`` = '{"sectionid":"283823"}')."""
+    try:
+        return int(json.loads(module.get("customdata") or "{}").get("sectionid") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 class CourseService:
@@ -101,7 +111,7 @@ class CourseService:
         term = parse_term(raw.get("shortname"))
         return Course(
             id=course_id,
-            name=raw.get("fullname") or raw.get("displayname") or raw.get("shortname") or f"Course {course_id}",
+            name=clean_name(raw.get("fullname") or raw.get("displayname") or raw.get("shortname")) or f"Course {course_id}",
             short_name=raw.get("shortname") or "",
             term=term,
             academic=term is not None,
@@ -114,7 +124,7 @@ class CourseService:
             classification=classification,
             progress=raw.get("progress") if isinstance(raw.get("progress"), (int, float)) else None,
             hidden=bool(raw.get("hidden")),
-            summary=html_to_text(raw.get("summary") or extra.get("summary"), max_len=600) or None,
+            summary=html_to_text(raw.get("summary") or extra.get("summary"), max_len=1500, hint="get_course has the full text") or None,
         )
 
     def build_module(self, raw: dict[str, Any], section_name: str | None) -> CourseModule:
@@ -132,16 +142,16 @@ class CourseService:
         return CourseModule(
             id=int(raw["id"]),
             instance=int(raw["instance"]) if raw.get("instance") is not None else None,
-            name=raw.get("name") or "",
+            name=clean_name(raw.get("name")),
             type=raw.get("modname") or "unknown",
             url=raw.get("url"),
-            description=html_to_text(raw.get("description"), max_len=500) or None,
+            description=html_to_text(raw.get("description")) or None,
             section=section_name,
             visible=bool(raw.get("uservisible", raw.get("visible", 1))),
             files=files,
             dates=dates,
             completion=completion,
-            availability=html_to_text(raw.get("availabilityinfo"), max_len=200) or None,
+            availability=html_to_text(raw.get("availabilityinfo")) or None,
         )
 
     # -- public ------------------------------------------------------------
@@ -165,8 +175,16 @@ class CourseService:
         return courses
 
     async def current_courses(self) -> list[Course]:
-        """In-progress courses; falls back to everything if Nexus has no term dates."""
+        """In-progress *classes*: what briefings, due dates and updates look at.
+
+        Non-academic enrolments (trainings, campus resources, recordings) never end, so
+        Moodle keeps them "in progress" forever; they are left out whenever at least one
+        term-coded course is running. Falls back to everything if Nexus has no term dates.
+        """
         current = await self.list_courses("inprogress")
+        classes = [c for c in current if c.academic]
+        if classes:
+            return classes
         if current:
             return current
         return [c for c in await self.list_courses("all") if c.classification != "hidden"]
@@ -193,26 +211,48 @@ class CourseService:
         extra = (await self.raw_course_fields([course_id])).get(course_id)
         course = self.build_course(match, extra, classify_course(match, self.nx.now_ts()))
         sections_raw = await self.contents(course_id)
+        observe_page_text(self.nx, course_id, sections_raw)
+        # Moodle 4.5+ subsections ("Readings", "Slides" inside "Week 1") come back as extra
+        # top-level sections (component mod_subsection) after all the real ones. Nest each one
+        # under the week that holds its subsection module so the course keeps its shape.
+        delegated = {int(s["id"]): s for s in sections_raw if s.get("component") == "mod_subsection"}
         sections: list[CourseSection] = []
         materials: list[CourseModule] = []
         activities: list[CourseModule] = []
-        for s in sections_raw:
-            name = s.get("name") or f"Section {s.get('section', '')}".strip()
-            modules = [self.build_module(m, name) for m in s.get("modules", []) or []]
-            sections.append(
-                CourseSection(
-                    id=int(s.get("id") or 0),
-                    name=name,
-                    summary=html_to_text(s.get("summary"), max_len=400) or None,
-                    modules=modules,
-                )
+
+        def build_section(s: dict[str, Any], path: str | None) -> CourseSection:
+            name = clean_name(s.get("name")) or f"Section {s.get('section', '')}".strip()
+            label = f"{path} › {name}" if path else name
+            modules: list[CourseModule] = []
+            for raw in s.get("modules", []) or []:
+                module = self.build_module(raw, label)
+                if module.type == "subsection":
+                    child = delegated.get(_subsection_id(raw))
+                    if child is not None:
+                        module.subsection = build_section(child, label)
+                modules.append(module)
+                if module.type in MATERIAL_MODULES or (module.files and module.type not in ACTIVITY_MODULES):
+                    materials.append(module)
+                elif module.type in ACTIVITY_MODULES:
+                    activities.append(module)
+            edit = self.nx.watch.last_change(f"course:{course_id}:section:{s.get('id')}")
+            return CourseSection(
+                id=int(s.get("id") or 0),
+                name=name,
+                summary=html_to_text(s.get("summary")) or None,
+                summary_last_edited=self.nx.when(int(edit["noticed"])) if edit else None,
+                summary_last_edit={"added": edit["added"], "removed": edit["removed"]} if edit else None,
+                modules=modules,
             )
-            for m in modules:
-                if m.type in MATERIAL_MODULES or (m.files and m.type not in ACTIVITY_MODULES):
-                    materials.append(m)
-                elif m.type in ACTIVITY_MODULES:
-                    activities.append(m)
-        description = html_to_text((extra or {}).get("summary") or match.get("summary"), max_len=3000) or None
+
+        nested = {
+            _subsection_id(m) for s in sections_raw for m in s.get("modules", []) or [] if m.get("modname") == "subsection"
+        }
+        for s in sections_raw:
+            if int(s.get("id") or 0) in delegated and int(s["id"]) in nested:
+                continue  # rendered inside its parent week
+            sections.append(build_section(s, None))
+        description = html_to_text((extra or {}).get("summary") or match.get("summary")) or None
         return CourseDetail(
             **course.model_dump(),
             description=description,

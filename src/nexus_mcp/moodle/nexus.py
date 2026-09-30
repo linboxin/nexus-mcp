@@ -14,6 +14,8 @@ from ..config import Settings
 from ..errors import NexusUnsupportedError
 from ..models.common import Freshness, When
 from ..timeutil import display, relative, resolve_timezone, short, to_local
+from ..google import GoogleDrive
+from ..watch import TextWatch
 from .assignments import AssignmentService
 from .calendar import CalendarService
 from .client import MoodleClient
@@ -45,6 +47,22 @@ class Nexus:
         self.materials = MaterialService(self)
         self.calendar = CalendarService(self)
         self.notifications = NotificationService(self)
+        self._watch: TextWatch | None = None
+        self._google: GoogleDrive | None = None
+
+    @property
+    def google(self) -> GoogleDrive:
+        """Optional Google Drive reader for linked Docs/Slides (``nexus-mcp google login``)."""
+        if self._google is None:
+            self._google = GoogleDrive(self.settings.config_dir)
+        return self._google
+
+    @property
+    def watch(self) -> TextWatch:
+        """Fingerprints of course-page text (see ``watch.py``), kept in the config dir."""
+        if self._watch is None:
+            self._watch = TextWatch(self.settings.config_dir)
+        return self._watch
 
     @classmethod
     def from_settings(
