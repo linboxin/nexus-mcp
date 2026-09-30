@@ -309,16 +309,19 @@ class AssignmentService:
         return assignments, warnings
 
     async def upcoming(
-        self, days: int = 7, course_id: int | None = None, *, include_submitted: bool = True
+        self, days: int = 7, course_id: int | None = None, *, include_submitted: bool = True, from_ts: int | None = None
     ) -> tuple[list[Assignment], list[str]]:
+        """Assignments due from ``from_ts`` (default now) to ``days`` ahead. The daily briefing
+        starts at midnight so something due at 10 AM still shows under TODAY at 11 PM."""
         course_ids = [int(course_id)] if course_id is not None else await self.nx.courses.current_course_ids()
         rows, warnings = await self.raw_assignments(course_ids)
         now_ts = self.nx.now_ts()
+        start = int(from_ts) if from_ts is not None else now_ts
         horizon = now_ts + max(1, int(days)) * 86400
         candidates = [
             self.build(a)
             for a in rows
-            if int(a.get("duedate") or 0) and now_ts <= int(a["duedate"]) <= horizon
+            if int(a.get("duedate") or 0) and start <= int(a["duedate"]) <= horizon
         ]
         await self.attach_statuses(candidates)
         if not include_submitted:

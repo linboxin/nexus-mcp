@@ -230,10 +230,11 @@ def _greeting(now: datetime) -> str:
     return "Good evening."
 
 
-def _assignment_line(a: Assignment, *, with_day: bool = False) -> str:
+def _assignment_line(a: Assignment, *, with_day: bool = False, now_ts: int | None = None) -> str:
     when = "no due date"
     if a.due:
-        when = a.due.short if with_day else f"due {a.due.short.split(', ', 1)[-1]}"
+        was = now_ts is not None and a.due.unix < now_ts
+        when = a.due.short if with_day else f"{'was due' if was else 'due'} {a.due.short.split(', ', 1)[-1]}"
     return f"{_course_label(a)} — {a.name} — {when} — {_status_label(a)}"
 
 
@@ -243,12 +244,15 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
     tomorrow_end = today_end + 86400
     warnings: list[str] = []
 
-    upcoming, w = await _safe(nx.assignments.upcoming(days=7), ([], []), warnings, "upcoming assignments")
+    midnight = unix(start_of_day(now))
+    upcoming, w = await _safe(nx.assignments.upcoming(days=7, from_ts=midnight), ([], []), warnings, "upcoming assignments")
     warnings.extend(w)
     overdue, w = await _safe(nx.assignments.overdue(), ([], []), warnings, "overdue assignments")
     warnings.extend(w)
+    overdue_ids = {a.id for a in overdue}
+    upcoming = [a for a in upcoming if a.id not in overdue_ids]  # listed once, under OVERDUE
     events, w = await _safe(
-        nx.calendar.events(days=2, since_ts=unix(start_of_day(now))), ([], []), warnings, "calendar"
+        nx.calendar.events(days=2, since_ts=midnight), ([], []), warnings, "calendar"
     )
     warnings.extend(w)
     labels = await _course_labels(nx)
@@ -268,8 +272,8 @@ async def daily_briefing(nx: Nexus) -> dict[str, Any]:
 
     lines = [f"{_greeting(now)} It is {now:%A}, {now:%B} {now.day}.", ""]
     lines.append("🔴 TODAY")
-    lines.extend([_assignment_line(a) for a in today] or ["Nothing due today."])
     now_ts = unix(now)
+    lines.extend([_assignment_line(a, now_ts=now_ts) for a in today] or ["Nothing due today."])
     if events_today:
         lines.extend(
             f"{_event_course(e, labels)} — {_event_label(e)} — {e.start.short.split(', ', 1)[-1] if e.start else ''}"

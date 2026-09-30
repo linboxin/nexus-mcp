@@ -232,3 +232,23 @@ async def test_google_doc_is_read_and_edits_are_flagged(google_world, nexus, tmp
         [upd] = (await nexus.notifications.course_updates(since))["module_updates"]
         assert upd["module"] == "Timeline - LIVE" and upd["changes"] == ["Google file edited"]
         assert upd["added"] == ["Week 3: JavaScript"]
+
+
+async def test_daily_briefing_keeps_earlier_today_work_once(fake, nexus):
+    fake.on("core_enrol_get_users_courses", [course(1, CSC, "26/FA.CSC-385-01")])
+    fake.on("core_course_get_courses_by_field", {"courses": [], "warnings": []})
+    hw = assignment(1, 1, "Homework 1", due=NOW - 2 * HOUR, cmid=907931, nosubmissions=1, intro="<p>Push to cs-gitlab.</p>")
+    fake.on("mod_assign_get_assignments", assignments_payload({1: (CSC, [hw])}))
+    fake.on("mod_assign_get_submission_status", submissions_by_id({1: submission("new", cansubmit=False, canedit=False)}))
+    fake.on("core_calendar_get_calendar_events", {"events": [], "warnings": []})
+    fake.on("core_calendar_get_action_events_by_timesort", {"events": [
+        {"id": 5, "name": "Homework 1 is due", "course": {"id": 1, "fullname": CSC}, "timestart": NOW - 2 * HOUR,
+         "timeduration": 0, "eventtype": "due", "modulename": "assign", "instance": 907931, "url": "u"}
+    ], "firstid": 5, "lastid": 5})
+    fake.on("mod_forum_get_forums_by_courses", [])
+    fake.on("core_course_get_contents", [])
+    fake.on("core_course_get_updates_since", {"instances": [], "warnings": []})
+    fake.on("message_popup_get_popup_notifications", {"notifications": [], "unreadcount": 0})
+    text = (await intelligence.daily_briefing(nexus))["text"]
+    assert "CSC-385 — Homework 1 — was due 10:00 AM — turned in elsewhere, check cs-gitlab" in text
+    assert text.count("Homework 1") == 2  # the TODAY line and its priority entry; no calendar duplicate
