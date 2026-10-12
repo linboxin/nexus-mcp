@@ -14,6 +14,7 @@ import pytest
 from nexus_mcp.auth import StoredToken
 from nexus_mcp.errors import NexusAuthError
 from nexus_mcp.oauth import CONNECT_PATH, MAX_ATTEMPTS, STATE_FILENAME, NexusOAuthProvider
+from nexus_mcp.oauth import ClientCredentialsMiddleware as http_app_wrap
 from nexus_mcp.server import create_server
 
 PUBLIC = "https://nexus.example.com"
@@ -65,7 +66,8 @@ def provider(tmp_path, received):
 async def app_client(provider):
     app = create_server(oauth=provider).streamable_http_app()
     async with app.router.lifespan_context(app):
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=PUBLIC) as c:
+        wrapped = http_app_wrap(app)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=wrapped), base_url=PUBLIC) as c:
             yield c
 
 
@@ -262,3 +264,47 @@ async def test_revoke_all_signs_everyone_out(provider):
         )).json()
         assert await provider.revoke_all() == 1
         assert (await mcp_init(client, tok["access_token"])).status_code == 401
+
+
+async def test_client_secret_basic_without_client_id_in_form(provider):
+    """Meta Muse registers client_secret_basic and sends only the Basic header (RFC 6749 §2.3.1)."""
+    async with app_client(provider) as client:
+        r = await client.post(
+            "/register",
+            json={"redirect_uris": ["https://agent.meta.ai/api/hatch/oauth/callback"], "client_name": "Muse",
+                  "token_endpoint_auth_method": "client_secret_basic", "grant_types": ["authorization_code", "refresh_token"]},
+        )
+        assert r.status_code == 201, r.text
+        reg = r.json()
+        req = await start_authorize(client, reg)
+        code = parse_qs(urlparse((await connect(client, provider, req)).headers["location"]).query)["code"][0]
+        verifier, _ = pkce()
+        basic = base64.b64encode(f"{reg['client_id']}:{reg['client_secret']}".encode()).decode()
+        tok = await client.post(
+            "/token",
+            headers={"Authorization": f"Basic {basic}"},
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": reg["redirect_uris"][0],
+                  "code_verifier": verifier},
+        )
+        assert tok.status_code == 200, tok.text
+        ref = await client.post(
+            "/token",
+            headers={"Authorization": f"Basic {basic}"},
+            data={"grant_type": "refresh_token", "refresh_token": tok.json()["refresh_token"]},
+        )
+        assert ref.status_code == 200, ref.text
+        # and a client that registered basic but sends the secret in the form still works
+        r = await client.post(
+            "/register",
+            json={"redirect_uris": ["https://agent.meta.ai/api/hatch/oauth/callback"], "client_name": "Muse 2",
+                  "token_endpoint_auth_method": "client_secret_basic"},
+        )
+        reg2 = r.json()
+        req = await start_authorize(client, reg2)
+        code = parse_qs(urlparse((await connect(client, provider, req)).headers["location"]).query)["code"][0]
+        tok = await client.post(
+            "/token",
+            data={"grant_type": "authorization_code", "code": code, "redirect_uri": reg2["redirect_uris"][0],
+                  "code_verifier": verifier, "client_id": reg2["client_id"], "client_secret": reg2["client_secret"]},
+        )
+        assert tok.status_code == 200, tok.text

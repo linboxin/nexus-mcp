@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import TYPE_CHECKING, Any, AsyncIterator
 
 from urllib.parse import urlparse
 
@@ -140,6 +140,16 @@ def build_oauth_provider(public_url: str, *, static_tokens: list[str] | None = N
     return provider
 
 
+def http_app(server: MCPServer, *, oauth: bool = False, **kwargs: Any):
+    """The streamable-HTTP ASGI app; with OAuth, wrapped to accept Basic client auth."""
+    app = server.streamable_http_app(**kwargs)
+    if oauth:
+        from .oauth import ClientCredentialsMiddleware
+
+        return ClientCredentialsMiddleware(app)
+    return app
+
+
 def transport_security(public_url: str | None, host: str, port: int):
     """DNS-rebinding protection that also admits the public hostname.
 
@@ -185,14 +195,17 @@ def serve(
                 raise ValueError("--oauth needs --public-url (the https:// address clients use)")
             provider = build_oauth_provider(public_url, static_tokens=[auth_token] if auth_token else None)
         server = create_server(auth_token=auth_token, public_url=public_url or f"http://{host}:{port}", oauth=provider)
-        server.run(
-            transport="streamable-http",
-            host=host,
-            port=port,
+        import uvicorn
+
+        app = http_app(
+            server,
+            oauth=provider is not None,
             stateless_http=stateless,
             json_response=stateless,
             transport_security=transport_security(public_url, host, port),
+            host=host,
         )
+        uvicorn.run(app, host=host, port=port, log_level="warning")
     else:
         create_server().run(transport="stdio")
 
