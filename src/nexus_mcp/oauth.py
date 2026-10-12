@@ -21,6 +21,7 @@ clients that prefer a header (Grok Bot, Claude Code, scripts).
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import hmac
 import html
@@ -31,6 +32,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import parse_qsl, unquote, urlencode
 
 from mcp.server.auth.provider import (
     AccessToken,
@@ -143,7 +145,15 @@ class NexusOAuthProvider:
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         data = self._state.clients.get(client_id)
-        return OAuthClientInformationFull.model_validate(data) if data else None
+        if not data:
+            return None
+        client = OAuthClientInformationFull.model_validate(data)
+        if client.token_endpoint_auth_method == "client_secret_basic":
+            # ClientCredentialsMiddleware moves Basic credentials into the form, so a
+            # secret-holding client is always checked the client_secret_post way. This also
+            # accepts clients that register "basic" but post the secret anyway.
+            client = client.model_copy(update={"token_endpoint_auth_method": "client_secret_post"})
+        return client
 
     async def register_client(self, client_info: OAuthClientInformationFull) -> None:
         async with self._lock:
@@ -338,6 +348,66 @@ class NexusOAuthProvider:
             self._state.codes.clear()
             self._save()
             return n
+
+
+class ClientCredentialsMiddleware:
+    """Accept OAuth client credentials in the ``Authorization: Basic`` header (RFC 6749 §2.3.1).
+
+    The MCP SDK's token/revoke handlers read ``client_id`` from the form body even for
+    ``client_secret_basic`` clients, so a client that (correctly) sends only the Basic
+    header gets 401 "Missing client_id". Meta Muse does exactly that. For POST /token
+    and /revoke this decodes the header into ``client_id``/``client_secret`` form
+    fields (unless already present) and drops the header; ``get_client`` then treats
+    the client as ``client_secret_post``.
+    """
+
+    PATHS = ("/token", "/revoke")
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        if scope.get("type") != "http" or scope.get("method") != "POST" or scope.get("path") not in self.PATHS:
+            await self.app(scope, receive, send)
+            return
+        headers = list(scope.get("headers") or [])
+        auth = next((v.decode("latin-1") for k, v in headers if k == b"authorization"), "")
+        if not auth.lower().startswith("basic "):
+            await self.app(scope, receive, send)
+            return
+        try:
+            raw = base64.b64decode(auth[6:].strip()).decode("utf-8")
+            client_id, _, client_secret = raw.partition(":")
+            client_id, client_secret = unquote(client_id), unquote(client_secret)
+        except (ValueError, UnicodeDecodeError):
+            await self.app(scope, receive, send)  # let the SDK reject it
+            return
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body"):
+                break
+        form = parse_qsl(body.decode("utf-8"), keep_blank_values=True)
+        names = {k for k, _ in form}
+        if "client_id" not in names:
+            form.append(("client_id", client_id))
+        if "client_secret" not in names and client_secret:
+            form.append(("client_secret", client_secret))
+        new_body = urlencode(form).encode("utf-8")
+        new_headers = [
+            (k, v) for k, v in headers if k not in (b"authorization", b"content-length", b"content-type")
+        ] + [(b"content-type", b"application/x-www-form-urlencoded"), (b"content-length", str(len(new_body)).encode())]
+        sent = False
+
+        async def replay() -> dict:
+            nonlocal sent
+            if sent:
+                return await receive()
+            sent = True
+            return {"type": "http.request", "body": new_body, "more_body": False}
+
+        await self.app({**scope, "headers": new_headers}, replay, send)
 
 
 class ConnectError(Exception):
