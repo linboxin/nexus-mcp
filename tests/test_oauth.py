@@ -308,3 +308,11 @@ async def test_client_secret_basic_without_client_id_in_form(provider):
                   "code_verifier": verifier, "client_id": reg2["client_id"], "client_secret": reg2["client_secret"]},
         )
         assert tok.status_code == 200, tok.text
+
+
+async def test_public_home_and_privacy_pages(provider):
+    async with app_client(provider) as client:
+        home = await client.get("/")
+        assert home.status_code == 200 and "Nexus MCP" in home.text and "/privacy" in home.text
+        privacy = await client.get("/privacy")
+        assert privacy.status_code == 200 and "read-only" in privacy.text

@@ -94,6 +94,11 @@ def create_server(
         from .oauth import CONNECT_PATH, connect_routes
 
         server.custom_route(CONNECT_PATH, methods=["GET", "POST"])(connect_routes(oauth))
+        from .oauth import public_routes
+
+        home, privacy = public_routes()
+        server.custom_route("/", methods=["GET"])(home)
+        server.custom_route("/privacy", methods=["GET"])(privacy)
     return server
 
 

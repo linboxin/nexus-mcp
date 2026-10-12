@@ -486,6 +486,42 @@ def render_message(title: str, message: str) -> str:
     return _PAGE.format(body=f"<h1>{esc(title)}</h1><p class='sub'>{esc(message)}</p>")
 
 
+HOME_TEXT = (
+    "A personal, read-only connector between one Union College student's Nexus (Moodle) account and "
+    "their AI assistants. It is unofficial and not affiliated with Union College. Source: "
+    "https://github.com/linboxin/nexus-mcp"
+)
+
+PRIVACY_HTML = """
+<h1>Privacy</h1>
+<p class="sub">Nexus MCP is a single-user tool run by its owner for their own Union College account.</p>
+<p><b>What it reads.</b> The owner's own Nexus (Moodle) data: courses, assignments, grades, materials,
+calendar and announcements; and, if the owner connects Google, the Google Docs, Slides, Sheets and
+folders their courses link to, with read-only Drive access.</p>
+<p><b>What it stores.</b> On the owner's server only: the owner's Nexus token, their Google refresh
+token, hashed sign-in tokens for the owner's own AI apps, and fingerprints of course-page text used to
+notice edits. Nothing is sold, shared, or used for advertising or model training.</p>
+<p><b>Who can use it.</b> Only the owner. Other accounts are refused at sign-in.</p>
+<p><b>Deleting.</b> Revoke Google access at myaccount.google.com/permissions and the Nexus token under
+Nexus → Preferences → Security keys; the owner can delete the server's files at any time.</p>
+<p>Questions: open an issue at github.com/linboxin/nexus-mcp.</p>
+"""
+
+
+def public_routes():
+    """``/`` and ``/privacy``: the pages Google's consent screen links to."""
+    from starlette.responses import HTMLResponse
+
+    async def home(_request):
+        body = f"<h1>Nexus MCP</h1><p class='sub'>{html.escape(HOME_TEXT)}</p><p><a href='/privacy'>Privacy</a></p>"
+        return HTMLResponse(_PAGE.format(body=body))
+
+    async def privacy(_request):
+        return HTMLResponse(_PAGE.format(body=PRIVACY_HTML))
+
+    return home, privacy
+
+
 def connect_routes(provider: NexusOAuthProvider):
     """Starlette endpoint for GET/POST ``/oauth/connect``."""
     from starlette.requests import Request
