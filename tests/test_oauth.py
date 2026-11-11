@@ -13,7 +13,7 @@ import pytest
 
 from nexus_mcp.auth import StoredToken
 from nexus_mcp.errors import NexusAuthError
-from nexus_mcp.oauth import CONNECT_PATH, MAX_ATTEMPTS, STATE_FILENAME, NexusOAuthProvider
+from nexus_mcp.oauth import CONNECT_PATH, DEVICE_COOKIE, MAX_ATTEMPTS, REFRESH_REUSE_GRACE, STATE_FILENAME, NexusOAuthProvider
 from nexus_mcp.oauth import ClientCredentialsMiddleware as http_app_wrap
 from nexus_mcp.server import create_server
 
@@ -156,11 +156,19 @@ async def test_full_flow_issues_tokens_that_open_mcp(provider, received):
         assert new["access_token"] != body["access_token"]
         assert (await mcp_init(client, body["access_token"])).status_code == 401
         assert (await mcp_init(client, new["access_token"])).status_code == 200
-        reuse = await client.post(
+        reuse = await client.post(  # a retry right after rotating still works (grace window)
             "/token",
             data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"], "client_id": reg["client_id"]},
         )
-        assert reuse.status_code == 400
+        assert reuse.status_code == 200
+        for record in provider._state.refresh.values():  # ...but not after the grace window
+            if "used_at" in record:
+                record["used_at"] -= REFRESH_REUSE_GRACE + 1
+        late = await client.post(
+            "/token",
+            data={"grant_type": "refresh_token", "refresh_token": body["refresh_token"], "client_id": reg["client_id"]},
+        )
+        assert late.status_code == 400
 
 
 async def mcp_init(client, token: str):
@@ -316,3 +324,25 @@ async def test_public_home_and_privacy_pages(provider):
         assert home.status_code == 200 and "Nexus MCP" in home.text and "/privacy" in home.text
         privacy = await client.get("/privacy")
         assert privacy.status_code == 200 and "read-only" in privacy.text
+
+
+async def test_remembered_browser_reconnects_with_one_click(provider, received):
+    async with app_client(provider) as client:
+        reg = await register(client)
+        first = await connect(client, provider, await start_authorize(client, reg))
+        assert first.status_code == 303 and DEVICE_COOKIE in first.cookies
+        assert len(received) == 1  # the Okta path refreshed the Nexus token
+
+        req = await start_authorize(client, reg)  # the app asks again (lost its tokens)
+        page = await client.get(CONNECT_PATH, params={"req": req})
+        assert "Approve" in page.text and "remembered" in page.text
+        r = await client.post(CONNECT_PATH, data={"req": req, "approve": "1"})
+        assert r.status_code == 303 and "code=" in r.headers["location"]
+        assert len(received) == 1  # no Okta, Nexus token untouched
+
+        client.cookies.clear()  # another browser: no shortcut
+        req = await start_authorize(client, reg)
+        page = await client.get(CONNECT_PATH, params={"req": req})
+        assert "Approve" not in page.text
+        r = await client.post(CONNECT_PATH, data={"req": req, "approve": "1"})
+        assert r.status_code == 400 and "isn&#x27;t remembered" in r.text
