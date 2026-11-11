@@ -54,8 +54,13 @@ SCOPE = "nexus"
 
 PENDING_TTL = 20 * 60  # time to finish the Okta sign-in and paste the link
 CODE_TTL = 5 * 60
-ACCESS_TTL = 8 * 3600
-REFRESH_TTL = 90 * 86400
+# Long-lived on purpose: one owner, and some clients (Grok's) don't refresh reliably;
+# an expired token there shows up as "reconnect", which costs an Okta sign-in.
+ACCESS_TTL = 30 * 86400
+REFRESH_TTL = 180 * 86400
+REFRESH_REUSE_GRACE = 300  # a rotated refresh token still works this long (client retries, parallel refreshes)
+DEVICE_TTL = 365 * 86400  # "remember this browser" for one-click reconnects
+DEVICE_COOKIE = "nexus_device"
 MAX_ATTEMPTS = 5
 
 Identify = Callable[[str], Awaitable[StoredToken]]
@@ -78,6 +83,7 @@ class _State:
     codes: dict[str, dict[str, Any]] = field(default_factory=dict)  # sha256(code) -> record
     access: dict[str, dict[str, Any]] = field(default_factory=dict)  # sha256(token) -> record
     refresh: dict[str, dict[str, Any]] = field(default_factory=dict)
+    devices: dict[str, dict[str, Any]] = field(default_factory=dict)  # sha256(cookie) -> {created, expires_at}
 
 
 class NexusOAuthProvider:
@@ -131,7 +137,11 @@ class NexusOAuthProvider:
         s.pending = {k: v for k, v in s.pending.items() if v["expires_at"] > now}
         s.codes = {k: v for k, v in s.codes.items() if v["expires_at"] > now}
         s.access = {k: v for k, v in s.access.items() if v["expires_at"] > now}
-        s.refresh = {k: v for k, v in s.refresh.items() if v["expires_at"] > now}
+        s.refresh = {
+            k: v for k, v in s.refresh.items()
+            if v["expires_at"] > now and now - v.get("used_at", now) <= REFRESH_REUSE_GRACE
+        }
+        s.devices = {k: v for k, v in s.devices.items() if v["expires_at"] > now}
 
     @property
     def owner_user_id(self) -> int | None:
@@ -193,6 +203,45 @@ class NexusOAuthProvider:
         pending = self._state.pending.get(request_id)
         return None if pending is None else (pending["client_name"] or pending["client_id"])
 
+    def device_ok(self, secret: str | None) -> bool:
+        record = self._state.devices.get(_hash(secret)) if secret else None
+        return bool(record and record["expires_at"] > time.time())
+
+    async def approve(self, request_id: str, device_secret: str | None) -> str:
+        """One-click reconnect from a browser that already proved it's the owner (Okta) once."""
+        if not self.device_ok(device_secret):
+            raise ConnectError("This browser isn't remembered any more. Sign in with Union Okta below.")
+        async with self._lock:
+            self._prune(time.time())
+            pending = self._state.pending.get(request_id)
+            if pending is None:
+                raise ConnectError("This sign-in request expired. Go back to your app and press Connect again.")
+            return self._issue_code(request_id, pending, str(self._state.owner_user_id))
+
+    def _issue_code(self, request_id: str, pending: dict[str, Any], subject: str) -> str:
+        params = AuthorizationParams.model_validate(pending["params"])
+        code = _new_secret("nxc_")
+        self._state.pending.pop(request_id, None)
+        self._state.codes[_hash(code)] = {
+            "client_id": pending["client_id"],
+            "scopes": params.scopes or [SCOPE],
+            "code_challenge": params.code_challenge,
+            "redirect_uri": str(params.redirect_uri),
+            "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
+            "resource": params.resource,
+            "subject": subject,
+            "expires_at": time.time() + CODE_TTL,
+        }
+        self._save()
+        return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state)
+
+    def remember_device(self) -> str:
+        secret = _new_secret("nxd_")
+        now = time.time()
+        self._state.devices[_hash(secret)] = {"created": now, "expires_at": now + DEVICE_TTL}
+        self._save()
+        return secret
+
     async def complete(self, request_id: str, token_link: str) -> str:
         """Check the pasted Nexus link; return the client redirect URL carrying the code.
 
@@ -233,22 +282,8 @@ class NexusOAuthProvider:
             result = self._on_new_token(identity)
             if asyncio.iscoroutine(result):
                 await result
-        params = AuthorizationParams.model_validate(pending["params"])
-        code = _new_secret("nxc_")
         async with self._lock:
-            self._state.pending.pop(request_id, None)
-            self._state.codes[_hash(code)] = {
-                "client_id": pending["client_id"],
-                "scopes": params.scopes or [SCOPE],
-                "code_challenge": params.code_challenge,
-                "redirect_uri": str(params.redirect_uri),
-                "redirect_uri_provided_explicitly": params.redirect_uri_provided_explicitly,
-                "resource": params.resource,
-                "subject": str(identity.user_id),
-                "expires_at": time.time() + CODE_TTL,
-            }
-            self._save()
-        return construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state)
+            return self._issue_code(request_id, pending, str(identity.user_id))
 
     # ------------------------------------------------------------------ codes + tokens
 
@@ -273,7 +308,10 @@ class NexusOAuthProvider:
 
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str) -> RefreshToken | None:
         record = self._state.refresh.get(_hash(refresh_token))
-        if not record or record["client_id"] != client.client_id or record["expires_at"] <= time.time():
+        now = time.time()
+        if not record or record["client_id"] != client.client_id or record["expires_at"] <= now:
+            return None
+        if now - record.get("used_at", now) > REFRESH_REUSE_GRACE:
             return None
         return RefreshToken(
             token=refresh_token,
@@ -288,10 +326,13 @@ class NexusOAuthProvider:
         self, client: OAuthClientInformationFull, refresh_token: RefreshToken, scopes: list[str]
     ) -> OAuthToken:
         async with self._lock:
-            old = self._state.refresh.pop(_hash(refresh_token.token), None)  # rotate
-            if old is None:
+            old = self._state.refresh.get(_hash(refresh_token.token))  # rotate, with a short reuse grace
+            now = time.time()
+            if old is None or now - old.get("used_at", now) > REFRESH_REUSE_GRACE:
                 raise TokenError(error="invalid_grant", error_description="refresh token already used or revoked")
-            self._state.access.pop(old.get("access_hash", ""), None)
+            if "used_at" not in old:
+                old["used_at"] = now
+                self._state.access.pop(old.get("access_hash", ""), None)
             token = self._issue(client.client_id, scopes or refresh_token.scopes, refresh_token.resource,
                                 refresh_token.subject)
             self._save()
@@ -457,13 +498,24 @@ if (b && navigator.clipboard && navigator.clipboard.readText) {{
 </body></html>"""
 
 
-def render_connect_page(*, client_name: str, launch_url: str, request_id: str, error: str | None = None) -> str:
+def render_connect_page(
+    *, client_name: str, launch_url: str, request_id: str, error: str | None = None, remembered: bool = False
+) -> str:
     esc = html.escape
     err = f'<p class="err">{esc(error)}</p>' if error else ""
+    quick = ""
+    if remembered:
+        quick = f"""
+<form method="post" action="{CONNECT_PATH}">
+<input type="hidden" name="req" value="{esc(request_id)}"><input type="hidden" name="approve" value="1">
+<button type="submit">Approve</button>
+</form>
+<p class="hint">This browser is remembered from an earlier Okta sign-in, so one click is enough.</p>
+<details style="margin-top:18px"><summary class="hint">Sign in with Union Okta instead (also refreshes the server's Nexus login)</summary>"""
     body = f"""
 <h1>Connect Nexus</h1>
 <p class="sub"><b>{esc(client_name)}</b> wants read-only access to your Nexus courses, assignments and grades.</p>
-{err}
+{err}{quick}
 <ol>
 <li><b>Sign in to Nexus.</b><br>
 <a class="btn" href="{esc(launch_url)}" target="_blank" rel="noopener">Sign in with Union Okta</a><br>
@@ -477,7 +529,7 @@ and choose <b>Copy Link</b>. Don't tap it.</span></li>
 <textarea id="link" name="link" placeholder="ltgopenlmsapp://token=…" required autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
 <div class="row"><button type="submit">Connect</button><button type="button" class="ghost" id="paste">Paste from clipboard</button></div>
 </form></li>
-</ol>"""
+</ol>{"</details>" if remembered else ""}"""
     return _PAGE.format(body=body)
 
 
@@ -529,36 +581,44 @@ def connect_routes(provider: NexusOAuthProvider):
 
     headers = {"Cache-Control": "no-store", "X-Frame-Options": "DENY", "Referrer-Policy": "no-referrer"}
 
-    async def endpoint(request: Request):
-        if request.method == "POST":
-            form = await request.form()
-            request_id = str(form.get("req") or "")
-            link = str(form.get("link") or "")
-            try:
-                redirect = await provider.complete(request_id, link)
-            except ConnectError as exc:
-                launch = provider.launch_url(request_id)
-                if launch is None:
-                    return HTMLResponse(render_message("Sign-in expired", exc.message), status_code=400, headers=headers)
-                page = render_connect_page(
-                    client_name=provider.pending_client_name(request_id) or "An app",
-                    launch_url=launch,
-                    request_id=request_id,
-                    error=exc.message,
-                )
-                return HTMLResponse(page, status_code=400, headers=headers)
-            return RedirectResponse(redirect, status_code=303, headers=headers)
-        request_id = request.query_params.get("req", "")
+    def set_device(response, secret: str) -> None:
+        response.set_cookie(
+            DEVICE_COOKIE, secret, max_age=DEVICE_TTL, path=CONNECT_PATH, secure=True, httponly=True, samesite="lax"
+        )
+
+    def page(request_id: str, remembered: bool, error: str | None = None, status: int = 200):
         launch = provider.launch_url(request_id)
         if launch is None:
             return HTMLResponse(
-                render_message("Sign-in expired", "Go back to your app and press Connect again."),
+                render_message("Sign-in expired", error or "Go back to your app and press Connect again."),
                 status_code=400,
                 headers=headers,
             )
-        page = render_connect_page(
-            client_name=provider.pending_client_name(request_id) or "An app", launch_url=launch, request_id=request_id
+        body = render_connect_page(
+            client_name=provider.pending_client_name(request_id) or "An app",
+            launch_url=launch,
+            request_id=request_id,
+            error=error,
+            remembered=remembered,
         )
-        return HTMLResponse(page, headers=headers)
+        return HTMLResponse(body, status_code=status, headers=headers)
+
+    async def endpoint(request: Request):
+        device = request.cookies.get(DEVICE_COOKIE)
+        remembered = provider.device_ok(device)
+        if request.method == "POST":
+            form = await request.form()
+            request_id = str(form.get("req") or "")
+            try:
+                if form.get("approve"):
+                    redirect = await provider.approve(request_id, device)
+                    return RedirectResponse(redirect, status_code=303, headers=headers)
+                redirect = await provider.complete(request_id, str(form.get("link") or ""))
+            except ConnectError as exc:
+                return page(request_id, remembered, exc.message, 400)
+            response = RedirectResponse(redirect, status_code=303, headers=headers)
+            set_device(response, device if remembered else provider.remember_device())
+            return response
+        return page(request.query_params.get("req", ""), remembered)
 
     return endpoint
